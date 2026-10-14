@@ -1,0 +1,342 @@
+# -*- coding: utf-8 -*-
+# 白奶子 TVBox 四壳通用 Python Spider
+# 站点: https://502113.bainaizi107.top/naizi/
+# 结构: 苹果CMSv10, 无详情页(播放页兼详情), player_aaaa encrypt=0直出m3u8
+# 分类: /vod/type/id/{id}, 播放: /vod/play/id/{id}/sid/1/nid/1, 搜索: /vod/search.html?wd=
+
+import re
+import json
+import urllib.parse
+
+try:
+    from curl_cffi import requests as curl_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
+
+try:
+    from base.spider import Spider
+except ImportError:
+    class Spider:
+        def __init__(self):
+            self.extend = {}
+
+# ==================== 未成年过滤 ====================
+MINOR_KEYWORDS = ['萝莉', '幼女', '少女', '童', 'teen', 'loli', 'schoolgirl', '未成年']
+
+def is_minor(text):
+    if not text:
+        return False
+    t = text.lower()
+    return any(kw.lower() in t for kw in MINOR_KEYWORDS)
+
+# ==================== 分类配置 (去重37个, 萝莉少女已剔除) ====================
+CATEGORIES = [
+    {"type_id": "49", "type_name": "精品推荐"},
+    {"type_id": "50", "type_name": "直播做爱"},
+    {"type_id": "51", "type_name": "欧美专区"},
+    {"type_id": "54", "type_name": "偷拍视频"},
+    {"type_id": "55", "type_name": "网曝门系列"},
+    {"type_id": "56", "type_name": "同性恋"},
+    {"type_id": "57", "type_name": "探花约炮"},
+    {"type_id": "58", "type_name": "人妻熟女"},
+    {"type_id": "59", "type_name": "SM调教"},
+    {"type_id": "60", "type_name": "制服诱惑"},
+    {"type_id": "61", "type_name": "麻豆传媒"},
+    {"type_id": "62", "type_name": "国产乱伦"},
+    {"type_id": "63", "type_name": "明星换脸"},
+    {"type_id": "64", "type_name": "主播做爱"},
+    {"type_id": "65", "type_name": "传媒出品"},
+    {"type_id": "66", "type_name": "探花专区"},
+    {"type_id": "67", "type_name": "自拍偷拍"},
+    {"type_id": "68", "type_name": "欧美高清"},
+    {"type_id": "69", "type_name": "精品动漫"},
+    {"type_id": "70", "type_name": "女同性恋"},
+    {"type_id": "71", "type_name": "男同性恋"},
+    {"type_id": "73", "type_name": "网爆黑料"},
+    {"type_id": "74", "type_name": "GG传媒"},
+    {"type_id": "75", "type_name": "调教SM"},
+    {"type_id": "77", "type_name": "国产视频"},
+    {"type_id": "96", "type_name": "国产主播"},
+    {"type_id": "97", "type_name": "国产传媒"},
+    {"type_id": "99", "type_name": "网红头条"},
+    {"type_id": "101", "type_name": "抖阴视频"},
+    {"type_id": "102", "type_name": "激情动漫"},
+    {"type_id": "104", "type_name": "韩国主播"},
+    {"type_id": "105", "type_name": "VR视角"},
+    {"type_id": "106", "type_name": "人妖系列"},
+    {"type_id": "107", "type_name": "中文字幕"},
+    {"type_id": "108", "type_name": "日本有码"},
+    {"type_id": "109", "type_name": "日本无码"},
+    {"type_id": "110", "type_name": "欧美无码"},
+    {"type_id": "111", "type_name": "女优明星"},
+    {"type_id": "112", "type_name": "强奸乱伦"},
+    {"type_id": "114", "type_name": "伦理三级"},
+    {"type_id": "116", "type_name": "AV解说"},
+]
+
+
+class Spider(Spider):
+    def __init__(self):
+        super().__init__()
+        self.siteUrl = "https://502113.bainaizi107.top"
+        self.rawSite = "https://502113.bainaizi107.top"
+        self.HOST = self.siteUrl
+        self._base_path = "/naizi/index.php/vod"
+        self._session = None
+
+    def init(self, extend=""):
+        if extend and isinstance(extend, str):
+            try:
+                self.extend = json.loads(extend)
+            except Exception:
+                self.extend = {}
+        elif isinstance(extend, dict):
+            self.extend = extend
+        else:
+            self.extend = {}
+        if self.extend.get("siteUrl"):
+            self.siteUrl = self.extend["siteUrl"]
+            self.HOST = self.siteUrl
+        if self.extend.get("proxy"):
+            self.siteUrl = self.extend["proxy"]
+            self.HOST = self.siteUrl
+
+    # ==================== HTTP ====================
+    def _get_session(self):
+        if self._session is None:
+            if HAS_CURL_CFFI:
+                self._session = curl_requests.Session(impersonate="chrome131")
+            else:
+                import requests as req_lib
+                self._session = req_lib.Session()
+                self._session.headers.update({
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                })
+        return self._session
+
+    def _fetch(self, url, timeout=15):
+        session = self._get_session()
+        try:
+            resp = session.get(url, timeout=timeout, allow_redirects=True)
+            if resp.status_code == 200:
+                return resp.text
+        except Exception:
+            pass
+        return ""
+
+    def _abs_url(self, url):
+        if not url:
+            return ""
+        if url.startswith("http"):
+            return url
+        if url.startswith("//"):
+            return "https:" + url
+        if url.startswith("/"):
+            return self.siteUrl + url
+        return self.siteUrl + "/" + url
+
+    # ==================== 解析视频列表 ====================
+    def _parse_videos(self, html):
+        vod_list = []
+        # li.thumbnail 结构
+        pattern = re.compile(
+            r'<li>\s*<a[^>]*class="thumbnail"[^>]*href="/naizi/index\.php/vod/play/id/(\d+)/sid/\d+/nid/\d+\.html"[^>]*>.*?'
+            r'data-original="([^"]+)".*?'
+            r'<h5><a[^>]*>([^<]+)</a></h5>',
+            re.S
+        )
+        for m in pattern.finditer(html):
+            vod_id = m.group(1)
+            vod_pic = self._abs_url(m.group(2).strip())
+            vod_name = m.group(3).strip()
+            if is_minor(vod_name):
+                continue
+            vod_list.append({
+                "vod_id": vod_id,
+                "vod_name": vod_name,
+                "vod_pic": vod_pic,
+                "vod_remarks": "",
+            })
+        return vod_list
+
+    # ==================== 1. homeContent ====================
+    def homeContent(self, *args):
+        result = {}
+        classes = [{"type_id": c["type_id"], "type_name": c["type_name"]} for c in CATEGORIES]
+        result["class"] = classes
+        filters = {}
+        for c in CATEGORIES:
+            filters[c["type_id"]] = []
+        result["filters"] = filters
+        html = self._fetch(f"{self.siteUrl}/naizi/")
+        result["list"] = self._parse_videos(html)
+        return result
+
+    # ==================== 2. categoryContent ====================
+    def categoryContent(self, tid, page=1, *args):
+        result = {}
+        page = int(page)
+        if page <= 1:
+            url = f"{self.siteUrl}{self._base_path}/type/id/{tid}.html"
+        else:
+            url = f"{self.siteUrl}{self._base_path}/type/id/{tid}/page/{page}.html"
+        html = self._fetch(url)
+        vod_list = self._parse_videos(html)
+        result["page"] = page
+        result["pagecount"] = 999
+        result["limit"] = 18
+        result["total"] = 999 * 18
+        result["list"] = vod_list
+        return result
+
+    # ==================== 3. detailContent ====================
+    def detailContent(self, ids, *args):
+        result = {}
+        vod_list = []
+        if isinstance(ids, str):
+            ids = [ids]
+        for vod_id in ids:
+            if not vod_id:
+                continue
+            # 无详情页, 播放页兼详情
+            html = self._fetch(f"{self.siteUrl}{self._base_path}/play/id/{vod_id}/sid/1/nid/1.html")
+            if not html:
+                continue
+            # 从 player_aaaa 取标题和m3u8
+            vod_name = ""
+            play_url = ""
+            m = re.search(r'(?:var\s+)?player_aaaa\s*=\s*', html)
+            if m:
+                start = m.end()
+                depth = 0
+                end = start
+                for i in range(start, min(start + 5000, len(html))):
+                    if html[i] == '{': depth += 1
+                    elif html[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            end = i + 1
+                            break
+                if end > start:
+                    try:
+                        data = json.loads(html[start:end])
+                        raw_url = data.get("url", "")
+                        if data.get("encrypt") == 1 and raw_url:
+                            raw_url = urllib.parse.unquote(raw_url)
+                        play_url = raw_url
+                        vd = data.get("vod_data", {})
+                        vod_name = vd.get("vod_name", "").strip()
+                    except Exception:
+                        pass
+            # 兜底标题
+            if not vod_name:
+                title_m = re.search(r'<title>(.*?)</title>', html, re.S)
+                if title_m:
+                    vod_name = title_m.group(1).strip()
+            if is_minor(vod_name):
+                continue
+            # 封面
+            vod_pic = ""
+            cover_m = re.search(r'data-original="([^"]+)"', html)
+            if cover_m:
+                vod_pic = self._abs_url(cover_m.group(1).strip())
+            # 构造播放列表 (vod_data中play_from/play_url为空, 手动构造单线路)
+            vod_play_from = "HD高清"
+            vod_play_url = f"第1集${play_url}" if play_url else ""
+            vod_list.append({
+                "vod_id": vod_id,
+                "vod_name": vod_name,
+                "vod_pic": vod_pic,
+                "vod_play_from": vod_play_from,
+                "vod_play_url": vod_play_url,
+            })
+        result["list"] = vod_list
+        return result
+
+    # ==================== 4. playerContent ====================
+    def playerContent(self, flag, id, vipFlags=None, *args):
+        result = {}
+        play_url = id if id.startswith("http") else self._abs_url(id)
+        result["parse"] = 0
+        result["jx"] = 0
+        result["url"] = play_url
+        result["header"] = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Referer": self.rawSite + "/",
+            "Origin": self.rawSite,
+        }
+        return result
+
+    # ==================== 5. searchContent ====================
+    def searchContent(self, key, page=1, *args):
+        result = {}
+        key_enc = urllib.parse.quote(key)
+        page = int(page)
+        if page <= 1:
+            url = f"{self.siteUrl}{self._base_path}/search.html?wd={key_enc}"
+        else:
+            url = f"{self.siteUrl}{self._base_path}/search/page/{page}/wd/{key_enc}.html"
+        html = self._fetch(url)
+        vod_list = self._parse_videos(html)
+        result["page"] = page
+        result["pagecount"] = 99
+        result["limit"] = 18
+        result["total"] = 99 * 18
+        result["list"] = vod_list
+        return result
+
+    # ==================== 6. localProxy ====================
+    def localProxy(self, param):
+        try:
+            if isinstance(param, str):
+                params = urllib.parse.parse_qs(param)
+            else:
+                params = param or {}
+            url = params.get("url", [""])[0] if isinstance(params, dict) else ""
+            if not url:
+                return [404, "text/plain", ""]
+            html = self._fetch(url, timeout=10)
+            if not html:
+                return [404, "text/plain", "fetch failed"]
+            cleaned = self._clean_m3u8(html, url)
+            return [200, "application/vnd.apple.mpegurl", cleaned]
+        except Exception:
+            return [404, "text/plain", ""]
+
+    def _clean_m3u8(self, content, base_url=""):
+        lines = content.split("\n")
+        cleaned = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if self._is_ad_segment(line):
+                continue
+            if line.startswith("#EXT-X-MEDIA-SEQUENCE"):
+                cleaned.append("#EXT-X-MEDIA-SEQUENCE:0")
+                continue
+            cleaned.append(line)
+        return "\n".join(cleaned)
+
+    def _is_ad_segment(self, line):
+        if not line or line.startswith("#"):
+            return False
+        ad_keywords = ["ad", "gg", "adv", "preroll", "片头", "广告"]
+        return any(kw in line.lower() for kw in ad_keywords)
+
+    # ==================== 7. 其他接口 ====================
+    def isVideoFormat(self, url):
+        return any(url.endswith(ext) for ext in [".m3u8", ".mp4", ".mkv", ".avi", ".flv", ".ts"])
+
+    def manualVideoCheck(self):
+        return False
+
+    def getDependence(self):
+        return "白奶子 Spider loaded"
+
+    def getName(self):
+        return "白奶子"
+
+    def destroy(self):
+        self._session = None

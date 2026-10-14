@@ -1,0 +1,88 @@
+{
+    "sites": [
+        {
+            "key": "4K影视仓py",
+            "name": "4K影视仓",
+            "type": 3,
+            "api": "./4K影视仓.py"
+        },
+        {
+            "key": "4K电影网py",
+            "name": "4K电影网",
+            "type": 3,
+            "api": "./4K电影网.py"
+        },
+        {
+            "key": "4kvmspy",
+            "name": "4kvms",
+            "type": 3,
+            "api": "./4kvms.py"
+        },
+        {
+            "key": "4k影视py",
+            "name": "4k影视",
+            "type": 3,
+            "api": "./4k影视.py"
+        },
+        {
+            "key": "ik4k影院py",
+            "name": "ik4k影院",
+            "type": 3,
+            "api": "./ik4k影院.py"
+        },
+        {
+            "key": "py_4K影视网py",
+            "name": "py_4K影视网",
+            "type": 3,
+            "api": "./py_4K影视网.py"
+        },
+        {
+            "key": "py_4kmppy",
+            "name": "py_4kmp",
+            "type": 3,
+            "api": "./py_4kmp.py"
+        },
+        {
+            "key": "py_河豚4Kpy",
+            "name": "py_河豚4K",
+            "type": 3,
+            "api": "./py_河豚4K.py"
+        },
+        {
+            "key": "剧下饭4Kpy",
+            "name": "剧下饭4K",
+            "type": 3,
+            "api": "./剧下饭4K.py"
+        },
+        {
+            "key": "咕噜咕噜4K  完美版py",
+            "name": "咕噜咕噜4K  完美版",
+            "type": 3,
+            "api": "./咕噜咕噜4K  完美版.py"
+        },
+        {
+            "key": "影探4K(聚合4k解析版)py",
+            "name": "影探4K(聚合4k解析版)",
+            "type": 3,
+            "api": "./影探4K(聚合4k解析版).py"
+        },
+        {
+            "key": "枫叶4k(1)py",
+            "name": "枫叶4k(1)",
+            "type": 3,
+            "api": "./枫叶4k(1).py"
+        },
+        {
+            "key": "橘汁4Kpy",
+            "name": "橘汁4K",
+            "type": 3,
+            "api": "./橘汁4K.py"
+        },
+        {
+            "key": "高清点播4Kpy",
+            "name": "高清点播4K",
+            "type": 3,
+            "api": "./高清点播4K.py"
+        }
+    ]
+}
