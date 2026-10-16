@@ -74,6 +74,24 @@ DETAIL_API = (API + '/trpc.universal_backend_service.page_server_rpc.PageServer/
               '?video_appid=3000010&vplatform=2&vversion_name=8.2.96')
 SEARCH_API = API + '/trpc.videosearch.mobile_search.MultiTerminalSearch/MbSearch?vplatform=2'
 
+# ---------------------------------------------------------------
+# 第三方解析接口（实测可用，2026-10-16 逐个验证）
+# 用法：前缀 + 视频页 URL，返回 JSON {"url": "<m3u8 直链>"}
+# 顺序即优先级（按实测速度排序）；任一失败自动切换下一个
+# ⚠ 均为第三方服务，随时可能失效；直链带时效 token，请勿缓存直链本身
+# ---------------------------------------------------------------
+PARSE_APIS = [
+    # qianyi —— 实测 1.8s，最快；直链为腾讯自家 CDN
+    'http://8.134.205.252:39466/ceshi/qianyi.php?key=rkd&url=',
+    # 分享者 —— 实测 3.3s
+    'http://zxy-th1.jsszks.dpdns.org:8090/?url=',
+    # gimy —— 实测 3.0s，HTTPS
+    'https://player.gimy.bot/u/parse.php?url=',
+]
+
+# 直链缓存时长（秒）。token 会过期，故设很短
+_PARSE_TTL = 300
+
 # 全部分类（腾讯视频频道 ID）
 CLASSES = [
     ('电视剧', '100113'),
@@ -548,6 +566,49 @@ def _fetch_episodes(cid):
     return out
 
 
+# ============================ 第三方解析 ============================
+def _parse_direct(page_url):
+    """依次尝试第三方解析接口，返回可播放的直链；全部失败返回 ''"""
+    key = 'P|' + page_url
+    hit = _ck(key)
+    if hit is not None:
+        return hit
+
+    q = urllib.parse.quote(page_url, safe='')
+    for api in PARSE_APIS:
+        try:
+            txt = _http(api + q, timeout=8, tries=1)
+            if not txt:
+                continue
+            link = ''
+            # 优先按 JSON 解析
+            try:
+                j = json.loads(txt)
+                if isinstance(j, dict):
+                    link = j.get('url') or j.get('playUrl') or ''
+                    if not link:
+                        d = j.get('data')
+                        if isinstance(d, dict):
+                            link = d.get('url') or d.get('playUrl') or ''
+                    link = link or ''
+            except Exception:
+                pass
+            # 兜底：正则从文本里抠 m3u8 / mp4
+            if not link:
+                m = re.search(r'https?://[^\s"\'<>\\]+?\.(?:m3u8|mp4)[^\s"\'<>\\]*', txt)
+                if m:
+                    link = m.group(0)
+            link = str(link).replace('\\/', '/')
+            if link.startswith('http'):
+                _log('解析成功', api.split('/')[2], link[:60])
+                _set(key, link, _PARSE_TTL)
+                return link
+        except Exception as e:
+            _log('解析失败', api.split('/')[2], repr(e)[:50])
+            continue
+    return ''
+
+
 # ============================ Spider ============================
 class Spider(_BaseSpider):
 
@@ -707,7 +768,17 @@ class Spider(_BaseSpider):
         else:
             page_url = '%s/x/cover/%s.html' % (HOST, cid)
 
-        # parse=1 表示该地址需要解析（非直链），交由框架内置解析器处理
+        # ① 先试第三方解析接口，能拿到直链就直连播放
+        direct = _parse_direct(page_url)
+        if direct:
+            return {
+                'parse': 0,
+                'playUrl': direct,
+                'url': direct,
+                'header': header,
+            }
+
+        # ② 回退：交给框架内置解析器处理（jx=1）
         return {
             'parse': 1,
             'playUrl': '',
