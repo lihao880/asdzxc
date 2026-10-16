@@ -57,14 +57,27 @@ _CTX.check_hostname = False
 _CTX.verify_mode = ssl.CERT_NONE
 _CACHE = {}
 
+# 每页条数: 实测接口 limit=50 返回 50 条; limit=100 反而塌回 20 (有上限)
+PAGE_SIZE = 50
+
+# ★★ 默认排序必须是 latest, 不能用 trending!
+#   实测各排序能翻出的总量:
+#     trending (热播榜) → 只有 60 部   ← 这就是"采不全"的元凶
+#     latest   (最新)   → 1000 部      ← 全部资源
+#     rating   (高分)   → 1000 部      ← 全部资源
+#   热播榜只是个"精选 60 部"的短榜, 拿它当默认 = 用户只能看到 60 部。
+DEFAULT_SORT = 'latest'
+SORTS = [
+    ('latest', '最新'), ('trending', '热播'), ('rating', '高分'),
+]
+WINDOWS = [('all', '全部'), ('week', '本周'), ('month', '本月')]
+
 # 分类: (kind, 名称) —— kind 即 API 的 content_kind 参数
 TYPES = [
     ('movie', '电影'), ('series', '剧集'), ('short_drama', '短剧'),
     ('anime', '动漫'), ('variety', '综艺'), ('documentary', '纪录片'),
     ('sports', '体育'),
 ]
-SORTS = [('trending', '热播'), ('latest', '最新'), ('rating', '高分')]
-WINDOWS = [('week', '本周'), ('month', '本月'), ('all', '全部')]
 
 # 播放线路优先级: 优先挑直链 m3u8
 DIRECT_KINDS = ('m3u8', 'mp4')
@@ -220,6 +233,49 @@ def _vods_from_cards(j):
     return vods
 
 
+def _pageinfo(j, pg, trust_total=False, has_next=False):
+    """从接口 pagination 里算 TVBox 的 pagecount / total
+
+    ⚠ 本接口 total 的可信度取决于【排序方式】, 而不是分类/搜索:
+      · sort=latest / rating / relevance → total 是真实总量 (实测 latest/all
+        报 1000, 第 20 页(50/页)正好到底, 第 21 页空 → 1000 准确)
+      · sort=trending (热播榜) → total 虚高不可信 (报 200 但第 3 页就结束)
+
+    ★ pagecount 必须是【总页数】: 
+        可信时 = ceil(total / 每页);  不可信时只能保守用 next_page 推。
+
+    参数:
+      trust_total  → 本次 total 是否可信
+      has_next     → 本次确实还有下一页 (has_more / next_page 有值)
+    返回 (pagecount, total)
+    """
+    pi = {}
+    if isinstance(j, dict):
+        pi = j.get('pagination') or {}
+    if not isinstance(pi, dict):
+        pi = {}
+
+    nxt = pi.get('next_page')
+    has_more = bool(pi.get('has_more')) or bool(has_next)
+    raw_total = int(pi.get('total') or 0)
+
+    if trust_total and raw_total:
+        total = raw_total
+        pagecount = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    elif nxt:
+        # total 不可信: 只能确保"能走到 next_page"
+        pagecount = max(pg + 1, int(nxt))
+        total = pagecount * PAGE_SIZE
+    elif has_more:
+        pagecount = pg + 1
+        total = pagecount * PAGE_SIZE
+    else:
+        pagecount = pg
+        total = pg * PAGE_SIZE
+
+    return pagecount, total
+
+
 def _best_line(lines):
     """从 line_options 里挑最佳直链: 优先 m3u8 直链, 按 preference_weight 降序"""
     direct, resolve = [], []
@@ -286,27 +342,41 @@ class Spider(_BaseSpider):
             pg = max(1, int(pg))
         except Exception:
             pg = 1
-        sort, window = 'trending', 'week'
+        sort, window = DEFAULT_SORT, 'all'
         if isinstance(extend, dict):
             sort = extend.get('sort') or sort
             window = extend.get('window') or window
         if sort not in ('trending', 'latest', 'rating', 'relevance'):
-            sort = 'trending'
+            sort = DEFAULT_SORT
         if window not in ('week', 'month', 'all'):
-            window = 'week'
+            window = 'all'
         kind = tid if tid in [k for k, _ in TYPES] else 'movie'
-        q = ('/v1/browse/catalog?sort=%s&window=%s&kind=%s&page=%d&limit=20'
-             % (sort, window, kind, pg))
+        q = ('/v1/browse/catalog?sort=%s&window=%s&kind=%s&page=%d&limit=%d'
+             % (sort, window, kind, pg, PAGE_SIZE))
         j = _api_cached(q)
         vods = _vods_from_cards(j)
-        has_more = False
-        if isinstance(j, dict):
-            pg_info = j.get('pagination') or {}
-            has_more = bool(pg_info.get('has_more'))
+
+        # ★ 空结果回退: 万一某分类在某排序下为空, 依次换 latest / rating 再试
+        if not vods and pg == 1:
+            for alt in ('latest', 'rating'):
+                if alt == sort:
+                    continue
+                q2 = ('/v1/browse/catalog?sort=%s&window=%s&kind=%s&page=1&limit=%d'
+                      % (alt, window, kind, PAGE_SIZE))
+                j2 = _api_cached(q2)
+                v2 = _vods_from_cards(j2)
+                if v2:
+                    _log('分类 %s 在 %s 下为空, 已回退 %s' % (kind, sort, alt))
+                    j, vods, sort = j2, v2, alt
+                    break
+
+        # ★ total 可信度取决于排序: latest/rating 可信, trending 虚高
+        pagecount, total = _pageinfo(j, pg, trust_total=(sort != 'trending'))
         return {
             "list": vods, "page": pg,
-            "pagecount": pg + 1 if (has_more or len(vods) >= 20) else pg,
-            "limit": 20, "total": 999999 if vods else 0,
+            "pagecount": pagecount,
+            "limit": PAGE_SIZE,
+            "total": total or (999999 if vods else 0),
         }
 
     def searchContent(self, key, quick, pg="1"):
@@ -316,10 +386,18 @@ class Spider(_BaseSpider):
             pg = 1
         if not key:
             return {"list": [], "page": pg}
-        q = '/v1/browse/catalog?q=%s&sort=relevance&page=%d&limit=20' % (
-            urllib.parse.quote(key), pg)
-        vods = _vods_from_cards(_api_cached(q, ttl=180))
-        return {"list": vods, "page": pg}
+        # 搜索不限定 kind → 电影/剧集/动漫/综艺/短剧/纪录片/体育 全部返回
+        q = '/v1/browse/catalog?q=%s&sort=relevance&page=%d&limit=%d' % (
+            urllib.parse.quote(key), pg, PAGE_SIZE)
+        j = _api_cached(q, ttl=180)
+        vods = _vods_from_cards(j)
+        pagecount, total = _pageinfo(j, pg, trust_total=True)
+        return {
+            "list": vods, "page": pg,
+            "pagecount": pagecount,
+            "limit": PAGE_SIZE,
+            "total": total or (999999 if vods else 0),
+        }
 
     def _episodes(self, variant_id):
         """取剧集列表并缓存"""
@@ -413,4 +491,56 @@ class Spider(_BaseSpider):
         return {"parse": 0, "playUrl": "", "url": url, "header": header}
 
 
-# 学习用途
+if __name__ == '__main__':
+    # 自测: python3 dongpian5.py            → 跑全部分类 + 搜索
+    #       python3 dongpian5.py 搜索 爱情   → 只测搜索
+    args = sys.argv[1:]
+    mode = args[0] if args else 'all'
+    s = Spider()
+    s.init()
+
+    if mode in ('all', '分类'):
+        print('=' * 66)
+        print('【分类】每类第一页 (PAGE_SIZE=%d)' % PAGE_SIZE)
+        print('=' * 66)
+        for k, n in TYPES:
+            r = s.categoryContent(k, '1', True, {})
+            first = r['list'][0]['vod_name'] if r['list'] else '(空)'
+            print('  %-12s %-6s 条数 %2d  总 %5s  首条: %s'
+                  % (n, k, len(r['list']), r['total'], first))
+
+    if mode in ('all', '搜索') or mode == '搜索':
+        kw = args[1] if len(args) > 1 else '爱情'
+        print()
+        print('=' * 66)
+        print('【搜索】关键词: %s (全类型)' % kw)
+        print('=' * 66)
+        r = s.searchContent(kw, False, '1')
+        print('  条数 %d, pagecount %d, total %s'
+              % (len(r['list']), r['pagecount'], r['total']))
+        for v in r['list'][:8]:
+            print('    -', v['vod_name'], '|', v.get('_kind'), '|', v['vod_remarks'])
+
+    if mode in ('all', '详情'):
+        print()
+        print('=' * 66)
+        print('【详情/播放】抽查一条')
+        print('=' * 66)
+        r = s.searchContent('爱情公寓', False, '1')
+        if r['list']:
+            vid = r['list'][0]['vod_id']
+            d = s.detailContent([vid])
+            v = d['list'][0]
+            print('  名称:', v['vod_name'], '| 线路:', v.get('vod_play_from'))
+            seg = (v.get('vod_play_url') or '').split('#')
+            print('  剧集数:', len(seg), '| 前2集:', ' / '.join(seg[:2]))
+            if seg:
+                tok = seg[0].split('$')[-1]
+                p = s.playerContent('', tok, None)
+                print('  播放地址:', (p['url'] or '(未取得)')[:100])
+
+    print()
+    print('=' * 66)
+    print('自测结束')
+    print('=' * 66)
+

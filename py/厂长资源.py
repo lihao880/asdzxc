@@ -33,13 +33,26 @@ _CTX.verify_mode = ssl.CERT_NONE
 _CACHE = {}
 
 # 分类: (type_id, 名称) —— type_id 即 MacCMS 的 vodshow 分类号
+#
+# ★ 1/2/3/4 是"父级总入口", 不是子分类:
+#     /cdvodshow/1-----------.html → 全部电影 (动作+喜剧+爱情+... 聚合)
+#     /cdvodshow/2-----------.html → 全部电视剧
+#     /cdvodshow/3-----------.html → 全部综艺
+#     /cdvodshow/4-----------.html → 全部动漫
+#   ★★ 新手坑: 只列子分类会"看起来正常但采不全" —— 用户点"电影"时
+#      若源里没有 id=1, TVBox 就找不到电影总入口, 只能一个个子分类翻。
+#      所以父级 + 子级都要列。
 TYPES = [
+    (1, '电影'), (2, '电视剧'), (3, '综艺'), (4, '动漫'),      # ★ 父级总入口
     (6, '动作片'), (7, '喜剧片'), (8, '爱情片'), (9, '科幻片'), (10, '恐怖片'),
     (11, '剧情片'), (12, '战争片'), (20, '纪录片'), (29, '犯罪片'), (39, '动漫片'),
     (13, '国产剧'), (14, '港台剧'), (15, '日韩剧'), (16, '欧美剧'), (21, '泰剧'), (35, '海外剧'),
     (22, '内地综艺'), (23, '港台综艺'), (24, '日韩综艺'), (25, '欧美综艺'),
     (26, '国漫'), (27, '日漫'), (28, '欧美动漫'), (34, '海外动漫'),
 ]
+
+# 单页条数: MacCMS 该站固定一页 36 条, URL 参数改不动 (实测 pagesize/limit 均无效)
+PAGE_SIZE = 36
 
 SORT = [('time', '按时间'), ('hits', '按人气'), ('score', '按评分')]
 
@@ -166,6 +179,33 @@ def _parse_list(page_html):
     return vods
 
 
+def _total_pages(page_html):
+    """从分页区解析站点声明的总页数
+
+    页面里有这个标记:
+        <span class="num">1/188</span>      ← 当前页/总页数
+        <a href="/cdvodshow/6--------188---.html">尾页</a>
+
+    ★ 这是"每类条数太少"的正解: 把真实总页数交给 TVBox,
+      它才会在界面上显示全部页数, 用户才能一直翻到底。
+      没有它就只能靠 pg+1 猜, 界面看不到总量、也翻不了几页。
+    """
+    if not page_html:
+        return 0
+    # 优先取 "当前页/总页数" 标记
+    m = re.search(r'class="num">\s*\d+\s*/\s*(\d+)\s*<', page_html)
+    if m:
+        return int(m.group(1))
+    # 退而求其次: 找 "尾页" 链接里的页码
+    m = re.search(r'>\s*尾页\s*</a>', page_html)
+    if m:
+        mm = re.search(r'href="[^"]*?(\d+)---\.html"[^>]*>\s*尾页',
+                       page_html)
+        if mm:
+            return int(mm.group(1))
+    return 0
+
+
 def _list_url(tid, pg, sort='time'):
     """MacCMS 筛选 URL: cdvodshow/{分类}--{排序}--------{页码}---.html
     实测锚点(勿改):
@@ -213,11 +253,27 @@ class Spider(_BaseSpider):
             sort = extend.get('sort') or sort
         if sort not in ('time', 'hits', 'score'):
             sort = 'time'
-        vods = _parse_list(_get(_list_url(tid, pg, sort)))
+        html = _get(_list_url(tid, pg, sort))
+        vods = _parse_list(html)
+
+        # ★ 用页面真实总页数, 而不是 pg+1 猜
+        total_pages = _total_pages(html)
+        if total_pages:
+            pagecount = total_pages
+            total = total_pages * PAGE_SIZE
+        elif vods:
+            # 解析不到分页标记时, 退化为"有数据就假定还有下一页"
+            pagecount = pg + 1
+            total = (pg + 1) * PAGE_SIZE
+        else:
+            pagecount = pg
+            total = 0
+
         return {
             "list": vods, "page": pg,
-            "pagecount": pg + 1 if len(vods) >= 20 else pg,
-            "limit": 20, "total": 999999 if vods else 0,
+            "pagecount": pagecount,
+            "limit": PAGE_SIZE,
+            "total": total,
         }
 
     def searchContent(self, key, quick, pg="1"):
@@ -242,13 +298,23 @@ class Spider(_BaseSpider):
                     "vod_remarks": '',
                 })
             if vods:
-                return {"list": vods, "page": pg}
+                return {"list": vods, "page": pg,
+                        "pagecount": pg, "limit": PAGE_SIZE,
+                        "total": len(vods)}
         except Exception as e:
             _log('suggest 异常', repr(e)[:60])
-        # 兜底: 搜索 HTML 页
+        # 兜底: 搜索 HTML 页 (带分页, 能翻到底)
         surl = '%s/index.php/vod/search/page/%d/wd/%s.html' % (
             _base(), pg, urllib.parse.quote(key))
-        return {"list": _parse_list(_get(surl, ttl=180)), "page": pg}
+        html = _get(surl, ttl=180)
+        vods = _parse_list(html)
+        tp = _total_pages(html)
+        return {
+            "list": vods, "page": pg,
+            "pagecount": tp or (pg + 1 if vods else pg),
+            "limit": PAGE_SIZE,
+            "total": (tp * PAGE_SIZE) if tp else (999999 if vods else 0),
+        }
 
     def detailContent(self, array):
         vid = str(array[0] if isinstance(array, list) else array)
@@ -369,4 +435,60 @@ class Spider(_BaseSpider):
         return {"parse": 0, "playUrl": "", "url": url, "header": header}
 
 
-# 学习用途
+if __name__ == '__main__':
+    # 自测: python3 cddxfz.py            → 分类 + 搜索 + 详情 + 播放
+    #       python3 cddxfz.py 搜索 庆余年
+    args = sys.argv[1:]
+    mode = args[0] if args else 'all'
+    s = Spider()
+    s.init()
+
+    if mode in ('all', '分类'):
+        hc = s.homeContent(True)
+        print('=' * 68)
+        print('【分类】共 %d 个 (含父级总入口 1/2/3/4) 每页 %d 条'
+              % (len(hc['class']), PAGE_SIZE))
+        print('=' * 68)
+        # 只抽前 8 个 + 父级, 避免请求太多
+        show = hc['class'][:8]
+        for c in show:
+            r = s.categoryContent(c['type_id'], '1', True, {})
+            print('  %-10s id=%-4s 条数%2d pagecount=%-5s total=%s'
+                  % (c['type_name'], c['type_id'], len(r['list']),
+                     r['pagecount'], r['total']))
+        print('  ... 其余 %d 个分类略' % max(0, len(hc['class']) - len(show)))
+
+    if mode in ('all', '搜索'):
+        kw = args[1] if len(args) > 1 else '庆余年'
+        print()
+        print('=' * 68)
+        print('【搜索】%s' % kw)
+        print('=' * 68)
+        r = s.searchContent(kw, False, '1')
+        print('  条数 %d' % len(r['list']))
+        for v in r['list'][:5]:
+            print('    -', v['vod_name'], '|', v['vod_remarks'], '| id', v['vod_id'])
+
+    if mode in ('all', '详情'):
+        print()
+        print('=' * 68)
+        print('【详情/播放】抽查')
+        print('=' * 68)
+        r = s.searchContent('庆余年', False, '1')
+        if r['list']:
+            vid = r['list'][0]['vod_id']
+            d = s.detailContent([vid])
+            v = d['list'][0]
+            print('  名称:', v['vod_name'], '| 线路:', v.get('vod_play_from'))
+            seg = (v.get('vod_play_url') or '').split('#')
+            print('  剧集数:', len(seg))
+            if seg:
+                pid = seg[0].split('$')[-1]
+                p = s.playerContent('', pid, None)
+                print('  播放地址:', (p['url'] or '(未取得)')[:100])
+
+    print()
+    print('=' * 68)
+    print('自测结束')
+    print('=' * 68)
+
