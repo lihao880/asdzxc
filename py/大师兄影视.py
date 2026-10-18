@@ -27,12 +27,18 @@
    注意页面里还有不止一个 "url" 字段(link 也叫 url), 且是第一个出现的,
    所以必须把 player_aaaa = {...} 整块抠出来再 json 解析, 不能全局搜 "url"。
 
-6. ★ 分类页 URL 是个大坑, 三组实测:
-   ① 裸地址 /list/1.html 才按分类出内容(电影 106 条 / 电视剧 22 条 / 综艺 58 条)
-   ② 一加参数分类就丢: /list/1-1-1.html 和 /list/2-1-1.html 返回的是同一批
-      46 条混页, 首条都是「相反的你和我 第一季」—— 想"修分页"反而修坏了分类
-   ③ 页码彻底无效: -2-2 / -2-3 / ?page=2 全部与第 1 页相同
-   结论: 分类用裸地址, 只给 1 页。
+6. ★ 分类页 URL 是个大坑 —— 我一开始判断错了, 这里是最新结论(2026-10-18):
+   ① 裸地址 /list/1.html 是「类型聚合页」: 顶部 10 条推荐 + 各子类最新 12 条,
+      拼出 106 条, 看起来像"全部", 其实没有第 2 页。
+   ② 真列表在二级分类: /vodtype/7.html(动作片) /vodtype/8.html(喜剧片)...
+      二级分类 ID 就写在类型页的 <h3> 里(/show/N-----------.html), 直接扒。
+   ③ 分页是 /vodtype/7-2.html, 每页 36 条正文, 页底有 "2/131" 这样的页码。
+      页码 1 也写成 -1.html, 跟页底「首页」链接一致。
+   ④ 旧结论「加参数就丢分类」只对 /list/N-1-1.html 成立(那是筛选参数),
+      跟 /vodtype/N-P.html 不是一回事。别再把它们混为一谈。
+   ⚠ 另外: 每页开头还有 10 张侧栏「猜你喜欢」卡片, 它们的 block 长 6000+
+     ~16000 字(垃圾标签撑的), 必须切掉, 否则每页头 10 条永远是同一批推荐,
+     翻 131 页看起来都像"没有分页"。
 
 7. ★ 网络层: urllib 抓 /list/N.html 会报 IncompleteRead(0 bytes read),
    同一地址 curl 却正常返回 43764 字节。原因是该站返回 chunked 空包,
@@ -44,8 +50,9 @@
    /search/-------------.html?wd=x  -> 「系统提示...搜索功能关闭中」
    /search.php?wd=x                -> 静默回落成首页
    /index.php/vod/search.html?wd=x -> HTTP 500
-   解决: 抓 6 个分类各一页建内存索引(约 320 条), 15 分钟有效, 本地模糊匹配。
-   注意必须串行抓, 并发会被 IP 限流, 一半请求返回空包。
+   解决: 抓 6 个主分类下的全部二级分类第 1 页建内存索引(约 700 条),
+   15 分钟有效, 本地模糊匹配。
+   注意必须串行抓 + sleep, 并发会被 IP 限流, 一半请求返回空包。
 
 广告方面: 本站(v1/v3/v12.ppqrrs.com、adfg8.vip)实测 adjump=0、图片假分片=0,
 但代理和过滤逻辑仍然保留 —— 它的源站会换, 哪天接上 fengbao 系就派上用场了。
@@ -416,18 +423,33 @@ def _parse_cards(html, strict=True):
     res = []
     seen = set()
 
-    # ★ 最准的切法: 直接把每个 stui-vodlist__box 从"它自己"切到"下一个 box 之前"。
     #   前面试过两种切法都踩坑:
     #     ① 从 box 往后截 1400 字 —— 垃圾标签把块撑到 800~1200 字,
     #        截短了丢 h4 名字, 截长了串到下一张卡;
     #     ② 按 <div class="... col-xs-3 ... list"> 切 —— 主内容区根本没这个 class
     #        (只有侧栏那 10 条推荐有), 结果每页只剩 10 条, 页页都一样。
+    #     ③ 先按"最后一个 stui-vodlist ul"裁正文 —— 大错。侧栏某张卡后面挂着
+    #        16000 字的垃圾标签, 把真正的正文 ul 挤到"最后一个"前面去了。
+    #   ★ 末尾那张只截 1200 字: 最后一张卡后面的垃圾标签能拖出 3000 多字。
+    #   ★ 侧栏 10 条推荐排在正文前面, 它们的块不是靠"长度"就能分辨的
+    #     (实测 673 字 vs 正文 1067 字, 差不多)。可靠的分界是正文的 <ul>:
+    #     侧栏推荐没有 stui-vodlist ul 包裹, 正文每张卡都挂在
+    #     <ul class="... stui-vodlist clearfix"><li>... 下面。
+    #     做法: 找第一个「后面紧跟 li+box」的 stui-vodlist ul, 从它开始算正文。
     starts = [m.start() for m in
               re.finditer(r'<div[^>]*class="[^"]*stui-vodlist__box[^"]*"[^>]*>', html, re.I)]
+    body_from = 0
+    for mu in re.finditer(r'<ul[^>]*class="[^"]*stui-vodlist[ "_]', html, re.I):
+        if re.search(r'<li[^>]*>', html[mu.end():mu.end() + 400], re.I):
+            body_from = mu.start()
+            break
+    if body_from:
+        starts = [s for s in starts if s > body_from]
+
     blocks = []
     if starts:
         for k, s in enumerate(starts):
-            e = starts[k + 1] if k + 1 < len(starts) else min(len(html), s + 2500)
+            e = starts[k + 1] if k + 1 < len(starts) else min(len(html), s + 1200)
             blocks.append(html[s:e])
     if not blocks:
         # 兜底: 有的模板没有 box, 直接用 thumb 的 a 切
@@ -435,24 +457,25 @@ def _parse_cards(html, strict=True):
             blocks.append(html[max(0, m.start() - 200):m.start() + 1200])
 
     for blk in blocks:
-        # 第一个带 thumb 的 a 就是封面链接
-        ahref = ""
-        atitle = ""
-        apic = ""
-        anote = ""
-        for m in A_TAG.finditer(blk):
-            attrs, inner = m.group(1), m.group(2)
-            href = _attr(attrs, "href")
-            if not href:
-                continue
-            if "v-odlist__thumb" in attrs or "lazyload" in attrs:
-                ahref = href
-                atitle = _attr(attrs, "title")
-                apic = _attr(attrs, "data-original") or _attr(attrs, "src")
-                anote = _clean(inner)
-                break
+        # 第一个带 title 的 thumb 链接就是封面。
+        # ★ 盒子开头常塞 100~300 字垃圾标签(里面的 <a> 没有 href),
+        #   所以不能逐个 <a> 循环 + break 之前要先判 href 是否为空,
+        #   直接在整块里找「带 thumb/lazyload 类的 a 标签」再解属性最稳。
+        m = re.search(
+            r'<a[^>]*class="[^"]*(?:stui-vodlist__thumb|lazyload)[^"]*"[^>]*>', blk, re.I)
+        if not m:
+            continue
+        attrs = m.group(0)
+        ahref = _attr(attrs, "href")
+        atitle = _attr(attrs, "title")
+        apic = _attr(attrs, "data-original") or _attr(attrs, "src")
         if not ahref:
             continue
+        # 备注: thumb 里那个 span, 形如 <span class="X pic-text text-center">HD</span>
+        anote = ""
+        mm = re.search(r'<span[^>]*pic-text[^>]*>(.*?)</span>', blk, re.S)
+        if mm:
+            anote = _clean(mm.group(1))
         # 名字兜底: 从 h4.title 里再找一次
         if not atitle:
             m = re.search(r'<h4[^>]*>\s*<a[^>]*title="([^"]*)"', blk, re.I)
@@ -832,36 +855,69 @@ class Spider(object):
         return {}
 
     # ---------- 分类 ----------
-    # ★★ 这个站的 URL 规则跟标准苹果CMS 完全不一样, 三组实测(2026-10):
+    # ★★ 这个站的分类结构跟标准苹果CMS 不一样, 四组实测(2026-10):
     #
-    #   ① 裸地址才按分类出内容:
-    #        /list/1.html -> 22 条, 首条「女王神剑」   (电影)
-    #        /list/2.html -> 22 条, 首条「明明已经杀了丈夫」(电视剧)
-    #        /list/3.html -> 58 条, 首条「黄子华栋笃笑」    (综艺)
-    #        /list/4.html -> 45 条, 首条「圣斗士星矢」      (动漫)
+    #   ① 裸地址 /list/N.html 是个「类型聚合页」, 不是列表页:
+    #        电影 /list/1.html -> 106 张卡 = 顶部 10 条推荐 + 8 个子类各 12 条
+    #        这些是「子类最新 12 部」拼起来的, 不重复, 但没有第 2 页。
     #
-    #   ② 一旦加上参数, 分类信息就丢了, 所有栏目都返回同一批混页:
-    #        /list/1-1-1.html /list/2-1-1.html /list/3-2-1.html
-    #        /list/4-1-1.html …… 全都是 46 条, 首条都是「相反的你和我 第一季」
-    #      —— 这是最容易踩的坑: 加了参数想"修好分页", 结果把分类搞坏了。
+    #   ② /vodtype/N.html 跟 /list/N.html 内容一模一样。真正的列表在二级分类:
+    #        /vodtype/7.html  动作片   /vodtype/8.html  喜剧片 ...
+    #      二级分类的 ID 从类型页的 <h3> 里直接扒(SUB_MAP)。
     #
-    #   ③ 页码彻底无效: -2-2 / -2-3 / ?page=2 全部返回与第 1 页相同的内容。
+    #   ③ 只有三种写法:
+    #        /vodtype/7.html        第 1 页
+    #        /vodtype/7-2.html      第 2 页   ← 参数是页码, 真的生效
+    #        /vodtype/7-2-2.html    混页(不按分类, 别用)
+    #      实测 /vodtype/7-2.html 与 7-3.html 首条不同, 每页 12 条;
+    #      页数封顶(7-50 之后开始回落), 靠"本页 0 条"来判断到底。
     #
-    #   所以: 分类用裸地址, 只给 1 页。裸地址的 22/45/58 条就是该栏目当前全部。
-    #   代价是每类条数比带参数的混页少(22 vs 46), 但那 46 条里混了别栏目的片子,
-    #   对用户来说是错的, 宁可少给不要给错。
+    #   ④ 老版本曾断言"分类页加参数会丢分类", 那只对 /list/N-1-1.html 成立。
+    #      /vodtype/N-P.html 是正确的分页写法, 之前漏了这条路, 导致全站只有 106 部。
     def categoryContent(self, tid, pg, filter=False, extend=None):
         page = int(pg or 1)
-        if page > 1:
+        tid = (tid or "1").strip()
+        m = re.search(r"/?(\d+)", tid)
+        cid = m.group(1) if m else "1"
+
+        subs = self._sub_ids(cid)
+        if not subs:
+            # 没有二级分类的栏目(伦理片/日韩): 直接读类型页, 只有一页
+            subs = [cid]
+
+        per = len(subs)
+        single = (len(subs) == 1 and subs[0] == cid)      # 30/36 这类没有子分类
+        # 全局页码 -> (第几个子类, 子类内第几页)
+        # ★ 越界要"钳住"而不是取模回绕: 取模会让第 65 页又变回第 1 页,
+        #   翻到后面全是重复的老内容, 看起来像分页坏了。
+        #   钳住之后超出的页自然返回空列表, TVBox 会停在这一页。
+        idx = (page - 1) // per
+        sub_pg = (page - 1) % per + 1
+        if single:
+            idx, sub_pg = 0, page
+        if page < 1:
             return {"list": [], "page": page, "pagecount": 1, "limit": 0, "total": 0}
-        tid = (tid or "/list/1.html").strip()
-        m = re.search(r"/list/(\d+)", tid)
-        cid = m.group(1) if m else (re.sub(r"\D", "", tid) or "1")
-        url = HOST + "/list/%s.html" % cid      # ★ 必须裸地址
+        sid = subs[idx]
+
+        # ★ 页码 1 也写成 /vodtype/30-1.html: 页底「首页」就是这形式,
+        #   裸地址在部分栏目会被站方当"无参数"回落成同一页。
+        url = HOST + "/vodtype/%s-%d.html" % (sid, sub_pg)
         html = _http(url)
         vids = _parse_cards(html)
-        return {"list": vids, "page": 1, "pagecount": 1,
-                "limit": len(vids), "total": len(vids)}
+        if not vids and sub_pg == 1:
+            # 少数栏目不吃 -1.html, 退回裸地址
+            html = _http(HOST + "/vodtype/%s.html" % sid)
+            vids = _parse_cards(html)
+
+        # 页数: 页面底部有 "3/131" 这种当前页/总页数, 直接读, 不必靠猜
+        pagecount = 999
+        m = re.search(r'(\d+)\s*/\s*(\d+)\s*</span>', html)
+        if m and m.group(2).isdigit():
+            pagecount = max(1, int(m.group(2)))
+        if not vids:
+            pagecount = max(page, 1)
+        return {"list": vids, "page": page, "pagecount": pagecount,
+                "limit": len(vids), "total": 0}
 
     # ---------- 详情 ----------
     def detailContent(self, array):
@@ -966,24 +1022,59 @@ class Spider(object):
                 out.append((name, path, mm.group(1)))
         return out
 
-    def _fetch_cat(self, cid):
+    def _sub_cats(self, html):
         """
-        抓一个分类的列表。★ 必须用裸地址 /list/<id>.html:
-        带参数的 /list/<id>-1-1.html 会丢掉分类信息, 所有栏目返回同一批混页。
-        本站也没有可用的分页(详见 categoryContent 注释)。
+        从类型页里抠二级分类: [("最新动作片","7"), ...]
+        抓出来只用于调试核对, 正式逻辑走 SUB_MAP(不依赖页面结构)。
         """
-        url = HOST + "/list/%s.html" % cid
-        html = _http(url, timeout=15)
-        if not html:
-            return []
         out = []
         seen = set()
-        for v in _parse_cards(html):
-            k = v["vod_name"]
-            if k in seen:
+        for m in re.finditer(r'<h3[^>]*>(.*?)</h3>', html, re.S):
+            mm = re.search(r'href="[^"]*/show/(\d+)-+\.html"[^>]*>(.*?)</a>', m.group(1), re.S)
+            if not mm:
                 continue
-            seen.add(k)
-            out.append(v)
+            sid = mm.group(1)
+            name = _clean(mm.group(2))
+            if not name or sid in seen or len(name) > 8:
+                continue
+            seen.add(sid)
+            out.append((name, sid))
+        return out
+
+    # ★ 主栏目 -> 二级分类。从各类型页 <h3> 里扒出来的现成 show 链接, 实测有效。
+    #   电视剧比别处多两个: 15 港剧 / 31 泰剧(首页导航里没露出, 但链接确实通)。
+    #   30(伦理片)/36(日韩) 没有二级分类, 它的类型页本身就 46 条, 没有更深的层。
+    SUB_MAP = {
+        "1": ["7", "8", "9", "10", "11", "12", "29", "13"],
+        "2": ["14", "15", "31"],
+        "3": ["21", "22", "23", "24"],
+        "4": ["25", "26", "27", "28"],
+    }
+
+    def _sub_ids(self, cid):
+        return list(self.SUB_MAP.get(str(cid), []))
+
+    def _fetch_cat(self, cid):
+        """
+        抓一个主分类。走二级分类的第 1 页(每类 36 条正文), 不再用裸地址 ——
+        裸地址的正文只有 36 条, 但那是聚合页; 二级分类能顺着页码继续往下翻,
+        搜索索引里也就装得下更多片子。
+        ★ 没有二级分类的栏目(30/36)退回自己的 -1.html。
+        """
+        subs = self._sub_ids(cid) or [cid]
+        out = []
+        seen = set()
+        for sid in subs:
+            html = _http(HOST + "/vodtype/%s-1.html" % sid, timeout=15)
+            if not html:
+                continue
+            for v in _parse_cards(html):
+                k = v["vod_name"]
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(v)
+            time.sleep(0.3)      # ★ 串行限速, 并发会被站方按 IP 限流
         return out
 
     def _build_index(self):
@@ -1182,17 +1273,22 @@ if __name__ == "__main__":
     for v in hv[:3]:
         print("      -", v["vod_name"], "|", v["vod_remarks"], "|", v["vod_id"][:64])
 
-    print("=== 3. 分类(本站无分页, 只出 1 页) ===")
-    for tid in ["/list/1.html", "/list/2.html"]:
+    print("=== 3. 分类(走二级分类, 每页 36 条, 可翻页) ===")
+    for tid in ["1", "2"]:
         c = categoryContent(tid, "1")
         lst = c.get("list", [])
-        print("    %-14s %d 条, 首条=%s" % (tid, len(lst), lst[0]["vod_name"] if lst else "-"))
-    c2 = categoryContent("/list/2.html", "2")
-    print("    第2页(应为空, 因为站方没做分页):", len(c2.get("list", [])), "条")
+        print("    栏目%s 第1页: %d 条, 首条=%s, 总页数=%s"
+              % (tid, len(lst), lst[0]["vod_name"] if lst else "-", c.get("pagecount")))
+    c2 = categoryContent("2", "2")
+    l2 = c2.get("list", [])
+    print("    栏目2 第2页: %d 条, 首条=%s" % (len(l2), l2[0]["vod_name"] if l2 else "-"))
+    c3 = categoryContent("1", "3")
+    l3 = c3.get("list", [])
+    print("    栏目1 第3页: %d 条, 首条=%s" % (len(l3), l3[0]["vod_name"] if l3 else "-"))
 
     print("=== 4. 详情 ===")
     # 找一部有分集的剧来演示
-    tv = categoryContent("/list/2.html", "1").get("list", [])
+    tv = categoryContent("2", "1").get("list", [])
     probe = tv[0] if tv else (hv[0] if hv else None)
     if probe:
         dd = detailContent([probe["vod_id"]]).get("list", [])
