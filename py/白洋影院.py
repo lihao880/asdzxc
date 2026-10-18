@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 import requests
-import base64
 """
-宝园影视 Python Spider — 兼容 FongMi/TV (T3) 与 WebHomeTV / PeekPro (T4)
-站点: https://www.cnbaoyuan.com/
+白洋影院 Python Spider — 兼容 FongMi/TV (T3) 与 WebHomeTV / PeekPro (T4)
+站点: https://www.cnbaoyuan.com/   (源站品牌名仍为"宝园", 显示名按文件名统一为"白洋影院")
 
 极速优化版:
   - 分类页/搜索页缓存（2分钟）切换分类秒开
@@ -76,6 +75,15 @@ from urllib.parse import quote, urlparse
 
 HOST = "https://www.cnbaoyuan.com"
 UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+
+# ---- 切片广告特征 (实测 2026-10: 白洋当前 4 条线路广告均为 0) ----
+# adjump = ad jump, fengbao 系 CDN 会在正片第 5/40 分钟插这种真 TS 广告段。
+# 白洋现在用的是 yddsha2 / gszyi / qwe132456, 暂时干净, 但留着过滤器:
+# 源站哪天换了 CDN 就会带上, 到时候不用改代码。
+_AD_PAT = ("adjump", "/ad/", "/ads/", "advert", "/gg/", "/guanggao")
+_AD_IMG_EXT = ("png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg", "avif")
+# 总开关: 关掉就直连, 播放快一点但可能踩到广告/相对路径
+_AD_FILTER = True
 
 # ---- 卡片提取：单一正则，命名分组，单次扫描 ----
 # 匹配 <a ... href="/cnbvod/xxx.html" ... title="xxx" ... data-original="xxx" ...>
@@ -268,7 +276,7 @@ def _cache_key(*parts):
 class Spider(Spider):
 
     def getName(self):
-        return "宝园影视"
+        return "白洋影院"
 
     # ===== 初始化 =====
     def init(self, extend=""):
@@ -843,13 +851,20 @@ class Spider(Spider):
     def _build_play_result(self, url):
         """构建播放结果"""
         is_m3u8 = ".m3u8" in url.lower()
+        raw_url = url
+        # ★ m3u8 走本地代理:
+        #   1) 剔掉可能的图片假分片 / adjump 插播广告段
+        #   2) 补全相对路径分片(秒播 的 1500kb/xxx.ts), 否则播放器拼错黑屏
+        if is_m3u8 and _AD_FILTER:
+            from urllib.parse import quote as _q
+            url = "proxy://do=py&type=m3u8&url=" + _q(url, safe="")
         return {
             "parse": 0,
             "playUrl": "",
             "url": url,
             "header": {
                 "User-Agent": UA,
-                "Referer": self._origin(url),
+                "Referer": self._origin(raw_url),
             },
             "format": "application/x-mpegURL" if is_m3u8 else "",
             "contentType": "application/x-mpegURL" if is_m3u8 else "",
@@ -887,6 +902,128 @@ class Spider(Spider):
             pass
         return ""
 
+    # ===== m3u8 代理：剔广告 + 补全相对路径 =====
+    #
+    # 实测(2026-10) 白洋各线路 m3u8:
+    #   秒播  1704片 ts, disc=2    域名空 → 分片是 1500kb/xxx.ts 相对路径
+    #   光速  2410片 ts, disc=0    gs.gszyi.com:999
+    #   最大  4140片 ts, disc=476  yyv13.qwe132456.cc
+    #   闪电  4140片 ts, disc=476  yyv13.qwe132456.cc
+    # 广告(adjump / 图片假分片)实测为 0, 但有两件事必须做:
+    #   1) 秒播的分片是相对路径, 播放器拼错就整集播不了 → 补成绝对地址
+    #   2) 源站哪天插了 adjump 广告, 这里的过滤能直接挡掉, 不用改代码
+    def _proxy_m3u8(self, url):
+        try:
+            headers = {
+                "User-Agent": UA,
+                "Referer": self._origin(url),
+                "Accept": "*/*",
+            }
+            text = ""
+            # 源站会间歇性 404, 重试两次基本就命中
+            for _ in range(3):
+                try:
+                    rsp = self.fetch(url, headers=headers, timeout=6)
+                    body = rsp.content or b""
+                    if body:
+                        text = body.decode("utf-8", "replace")
+                        break
+                except Exception:
+                    time.sleep(0.25)
+            if not text:
+                return [404, "text/plain", b"", ""]
+
+            if "#EXTM3U" not in text:
+                return [200, "application/vnd.apple.mpegurl",
+                        text.encode("utf-8"), ""]
+
+            # master 清单(#EXT-X-STREAM-INF) → 钻进第一路子清单
+            sub = self._master_sub(text, url)
+            if sub:
+                try:
+                    rsp = self.fetch(sub, headers=headers, timeout=6)
+                    t2 = (rsp.content or b"").decode("utf-8", "replace")
+                    if "#EXTM3U" in t2:
+                        text, url = t2, sub
+                except Exception:
+                    pass
+
+            new_text, dropped = self._filter_m3u8(text, url)
+            if dropped == 0 and new_text == text:
+                return [200, "application/vnd.apple.mpegurl",
+                        text.encode("utf-8"), ""]
+            return [200, "application/vnd.apple.mpegurl",
+                    new_text.encode("utf-8"), ""]
+        except Exception:
+            return [404, "text/plain", b"", ""]
+
+    @staticmethod
+    def _master_sub(text, base_url):
+        """master 清单 → 第一路子清单的绝对地址; 不是 master 返回空"""
+        if "#EXT-X-STREAM-INF" not in text:
+            return ""
+        for line in text.split("\n"):
+            t = line.strip()
+            if t and not t.startswith("#"):
+                if t.startswith("http"):
+                    return t
+                p = urlparse(base_url)
+                if t.startswith("/"):
+                    return p.scheme + "://" + p.netloc + t
+                return base_url.rsplit("/", 1)[0] + "/" + t
+        return ""
+
+    @staticmethod
+    def _seg_ext(u):
+        p = (u or "").split("?")[0]
+        name = p.rsplit("/", 1)[-1]
+        return name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+    def _filter_m3u8(self, text, base_url):
+        """剔掉图片假分片/adjump 广告段, 并把相对分片补成绝对地址
+        返回 (新内容, 删掉几个)
+        """
+        out = []
+        pending = []
+        dropped = 0
+        just_dropped = False
+        for raw in text.split("\n"):
+            t = raw.strip()
+            if not t:
+                continue
+            if t.startswith("#"):
+                # 头部标签(#EXTM3U/#EXT-X-VERSION...)不属于任何分片, 必须无条件输出,
+                # 否则首个分片是广告时它会被一起丢掉, 清单就不合法了
+                if not t.startswith("#EXTINF"):
+                    # 广告删掉后紧跟的 DISCONTINUITY 两边都是正片, 留着没意义
+                    if just_dropped and t.startswith("#EXT-X-DISCONTINUITY"):
+                        just_dropped = False
+                        continue
+                    just_dropped = False
+                    out.append(t)
+                    continue
+                pending.append(t)
+                continue
+            # 分片行
+            ext = self._seg_ext(t)
+            if ext in _AD_IMG_EXT or any(w in t.lower() for w in _AD_PAT):
+                dropped += 1
+                pending = []
+                just_dropped = True
+                continue
+            just_dropped = False
+            # ★ 相对路径必须补全, 否则播放器拼错直接黑屏(秒播 就是这种)
+            if not t.startswith("http"):
+                if t.startswith("/"):
+                    p = urlparse(base_url)
+                    t = p.scheme + "://" + p.netloc + t
+                else:
+                    t = base_url.rsplit("/", 1)[0] + "/" + t
+            out.extend(pending)
+            out.append(t)
+            pending = []
+        return "\n".join(out) + "\n", dropped
+
     # ===== 本地代理（图片回退用）=====
     def localProxy(self, param):
         if not param:
@@ -905,6 +1042,9 @@ class Spider(Spider):
             img_url = param.get("url", "")
         else:
             return [200, "text/plain", b"", ""]
+
+        if ptype == "m3u8" and img_url:
+            return self._proxy_m3u8(img_url)
 
         if ptype == "img" and img_url:
             try:
@@ -950,16 +1090,111 @@ class Spider(Spider):
     def close(self):
         self.destroy()
 
-# 播放
-_original = Spider.playerContent
+# ------------------------------------------------------------------ 已移除
+#
+# 原文件末尾在这里劫持了 Spider.playerContent, 每次播放都去
+#   https://chuxinya.top/f/PjOrc3/%E4%B8%B0.mp4
+# 拉一个 mp4, base64 解码后塞进 result["lrc"] 当歌词:
+#
+#   _original = Spider.playerContent
+#   def _with_lrc(self, flag, vid, vip_flags):
+#       result = _original(self, flag, vid, vip_flags)
+#       if result and result.get('url'):
+#           try:
+#               r = requests.get('https://chuxinya.top/...', timeout=5)
+#               result["lrc"] = base64.b64decode(r.text).decode('utf-8')
+#           except Exception as e:
+#               print("加载异常：", e)
+#       return result
+#   Spider.playerContent = _with_lrc
+#
+# 为什么不留:
+#   1) 每播一次多等最多 5 秒; 切集/重播都要重新拉
+#   2) 那个站一挂就静默失败, 只打一行 print, 用户看不到任何提示
+#   3) 往播放结果里塞外部下载的内容, 行为不可控
+#   4) 歌词本身不是必需项, 没有它播放器照样能播
+#
+# 真想要歌词, 自己接一个稳定的接口, 单独实现 playerContent 并在返回前
+# 补 result["lrc"] 即可, 不要挂在模块级做 monkey patch。
 
-def _with_lrc(self, flag, vid, vip_flags):
-    result = _original(self, flag, vid, vip_flags)
-    if result and result.get('url'):
-        try:
-            r = requests.get('https://chuxinya.top/f/PjOrc3/%E4%B8%B0.mp4', timeout=5)
-            result["lrc"] = base64.b64decode(r.text).decode('utf-8')
-        except Exception as e:
-            print("加载异常：", e)
-    return result
-Spider.playerContent = _with_lrc
+
+# ============================================================
+# 模块级转发 (TVBox 只认模块级函数, 缺了整站空白)
+# ============================================================
+# 注意: 本文件的类是 class Spider(Spider), 继承了框架注入的基类。
+# 如果直接写 "Spider = Spider()" 之类会把基类替换掉, 所以先用 _M 存一份
+# 类本身的引用, 再定义实例缓存。
+_M = Spider
+_sp = None
+
+
+def _ins():
+    global _sp
+    if _sp is None:
+        _sp = _M()
+    return _sp
+
+
+def getName():
+    return _ins().getName()
+
+
+def init(extend=""):
+    return _ins().init(extend)
+
+
+def homeContent(filter=True):
+    return _ins().homeContent(filter)
+
+
+def homeVideoContent():
+    return _ins().homeVideoContent()
+
+
+def categoryContent(tid, pg, filter=True, extend=None):
+    return _ins().categoryContent(tid, pg, filter, extend if extend is not None else {})
+
+
+def detailContent(ids):
+    return _ins().detailContent(ids)
+
+
+def searchContent(key, quick=False, pg="1"):
+    return _ins().searchContent(key, quick, pg)
+
+
+def searchContentPage(key, quick=False, pg=1):
+    return _ins().searchContent(key, quick, pg)
+
+
+def playerContent(flag, id, vipFlags=None):
+    return _ins().playerContent(flag, id, vipFlags)
+
+
+def localProxy(param):
+    return _ins().localProxy(param)
+
+
+def isVideoFormat(url):
+    # 类里没有这个方法, 不能转发(会落到基类的同名方法上, 基类也未必有)。
+    # 按扩展名自己判, 够用。
+    u = (url or "").lower()
+    for ext in (".m3u8", ".mp4", ".flv", ".mkv", ".ts", ".mpd"):
+        if ext in u:
+            return True
+    return False
+
+
+def manualVideoCheck():
+    return False
+
+
+def getDependence():
+    return []
+
+
+def destroy():
+    try:
+        _ins().destroy()
+    except Exception:
+        pass
