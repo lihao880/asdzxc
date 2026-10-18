@@ -52,6 +52,22 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 
 # 4K/蓝光 线路关键词: 详情页里线路名含这些词的会被排到最前
 HD_KEYWORDS = ["4k", "2160", "uhd", "蓝光", "bluray", "bd", "原盘", "hdr", "杜比", "dolby"]
 
+# ========== 切片广告过滤 (实测 2026-10) ==========
+# 实测 5 个源里只有【暴风】带插播广告, 走的 CDN 是 fengbao14.com:
+#   正片第 5 分钟 / 第 40 分钟处插入 /video/adjump/time/<时间戳>.ts
+#   共 9~18 个分片, 每个 3 秒, 合计 27~54 秒; 两侧夹 #EXT-X-DISCONTINUITY
+#   adjump = ad jump, 分片是真的 TS 视频(1.1MB), 不是图片
+# 其余 4 个源(量子/金鹰/红牛/非凡)实测 adjump=0、图片分片=0, 干净。
+# 处理方式: 播放时把 m3u8 包一层 localProxy, 剔除广告分片后再吐给播放器。
+AD_FILTER = True
+# 广告分片地址特征(小写子串匹配)。遇到新的广告路径往后加即可, 不用改逻辑
+AD_PAT = ("adjump", "/ad/", "/ads/", "advert", "/gg/", "/guanggao")
+# 图片扩展名: 广告方有时把 png/webp 伪装成分片混在 ts 里
+IMG_EXT = ("png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg", "avif")
+# 过滤后至少留这么多秒, 否则不采用过滤结果(防止把整集删成残片)
+MIN_KEEP_SEC = 900
+# ================================================
+
 
 def _log(*a):
     try:
@@ -356,8 +372,165 @@ class Spider(_Base):
     def playerContent(self, flag, id, vipFlags=None):
         url = id if (id or "").startswith("http") else id or ""
         header = {"User-Agent": UA, "Referer": SITES[0]["host"] + "/"}
+        # m3u8 里可能夹着伪装成 ts 的图片广告 / adjump 插播段 -> 走本地代理过滤
+        if AD_FILTER and ".m3u8" in url.lower():
+            # url 必须整段编码, 否则里面的 & 会把代理参数切断
+            url = "proxy://do=py&type=m3u8&url=" + urllib.parse.quote(url, safe="")
+            return {"parse": 0, "playUrl": "", "url": url, "header": header}
         return {"parse": 0 if _is_direct(url) else 1,
                 "playUrl": "", "url": url, "header": header}
+
+    # ---------- 切片广告过滤 ----------
+    @staticmethod
+    def _seg_ext(u):
+        """分片地址的扩展名, 取不到返回空串"""
+        p = (u or "").split("?")[0]
+        name = p.rsplit("/", 1)[-1]
+        return name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+    def _is_ad_seg(self, u):
+        """分片地址像广告吗(adjump 这类插播段)"""
+        low = (u or "").lower()
+        return any(w in low for w in AD_PAT)
+
+    def _master_sub(self, text, base_url):
+        """如果是 master 清单, 返回第一路子清单的绝对地址; 不是则返回 ''
+        master 的特征: 有 #EXT-X-STREAM-INF, 分片全是 .m3u8 且没有 #EXTINF
+        """
+        if "#EXT-X-STREAM-INF" not in text:
+            return ""
+        for line in text.split("\n"):
+            t = line.strip()
+            if t and not t.startswith("#"):
+                return urllib.parse.urljoin(base_url, t)
+        return ""
+
+    def _filter_m3u8(self, text, base_url):
+        """剔掉图片假分片和插播广告段, 相对地址补绝对
+        返回 (新内容, 删掉几个, 留下几个, 留下总秒数)
+        """
+        out = []
+        pending = []
+        pending_sec = 0.0
+        dropped = kept = 0
+        kept_sec = 0.0
+        just_dropped = False
+        for raw in text.split("\n"):
+            t = raw.strip()
+            if not t:
+                continue
+            if t.startswith("#"):
+                # ★ #EXTM3U / #EXT-X-VERSION / #EXT-X-TARGETDURATION 这些头部标签
+                #   不属于任何分片, 必须无条件先输出。攒进 pending 的话, 一旦
+                #   首个分片就是广告, 整批被丢, 清单没有 #EXTM3U 播放器不认。
+                if not t.startswith("#EXTINF"):
+                    # 广告删掉后, 紧跟的 DISCONTINUITY 两边都是正片, 留着没意义,
+                    # 有的播放器见到会重置解码器(画面闪一下)
+                    if just_dropped and t.startswith("#EXT-X-DISCONTINUITY"):
+                        just_dropped = False
+                        continue
+                    just_dropped = False
+                    out.append(t)
+                    continue
+                pending.append(t)
+                try:
+                    pending_sec = float(t.split(":", 1)[1].split(",")[0])
+                except Exception:
+                    pending_sec = 0.0
+                continue
+            # 分片行
+            if self._seg_ext(t) in IMG_EXT or self._is_ad_seg(t):
+                dropped += 1
+                pending = []
+                pending_sec = 0.0
+                just_dropped = True
+                continue
+            just_dropped = False
+            if not t.startswith("http"):
+                t = urllib.parse.urljoin(base_url, t)
+            out.extend(pending)
+            pending = []
+            out.append(t)
+            kept += 1
+            kept_sec += pending_sec
+            pending_sec = 0.0
+        return "\n".join(out) + "\n", dropped, kept, kept_sec
+
+    def localProxy(self, param):
+        """播放器请求 proxy:// 时走这里: 拉 m3u8 -> 过滤 -> 吐新清单"""
+        p = self._param(param)
+        if str(p.get("type") or "") not in ("", "m3u8"):
+            return [404, "text/plain", b""]
+        url = p.get("url") or ""
+        if not url:
+            return [404, "text/plain", b""]
+        body = b""
+        for _ in range(3):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": UA})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    body = r.read()
+                if body:
+                    break
+            except Exception:
+                # fengbao 这类站会间歇性 404, 隔 0.25 秒重试基本就命中
+                time.sleep(0.25)
+        if not body:
+            return [404, "text/plain", b""]
+        text = body.decode("utf-8", "replace")
+        if "#EXTM3U" not in text:
+            return [200, "application/vnd.apple.mpegurl", body]
+        # ★ master 清单(只列出子清单地址, 如 1000k/hls/mixed.m3u8):
+        #   不能直接吐给播放器 —— 子清单里是相对路径, 播放器会按 master 的
+        #   目录去拼, 拼出来全是 404。这里钻进第一路子清单, 继续过滤后返回。
+        #   代价是丢了多码率切换, 但 TVBox 播放器本来也不会手动切码率。
+        sub = self._master_sub(text, url)
+        if sub:
+            try:
+                req = urllib.request.Request(sub, headers={"User-Agent": UA})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    body2 = r.read()
+                text2 = body2.decode("utf-8", "replace")
+                if "#EXTM3U" in text2:
+                    text, body, url = text2, body2, sub
+            except Exception:
+                return [200, "application/vnd.apple.mpegurl", body]
+        new_text, dropped, kept, kept_sec = self._filter_m3u8(text, url)
+        ctype = "application/vnd.apple.mpegurl"
+        if dropped == 0:
+            # 没广告; 但相对地址(0000000.ts 这种)补全后的清单得吐出去
+            if new_text and new_text != text:
+                return [200, ctype, new_text.encode("utf-8")]
+            return [200, ctype, body]
+        if kept == 0 or kept_sec < MIN_KEEP_SEC:
+            # 全删光了 / 只剩残片 -> 原样回, 别让用户看到黑屏
+            return [200, ctype, body]
+        return [200, ctype, new_text.encode("utf-8")]
+
+    @staticmethod
+    def _param(param):
+        """localProxy 的 param 形态很多: dict / 查询串 / 整条代理URL"""
+        s = param
+        if isinstance(s, dict):
+            return s
+        if not isinstance(s, str):
+            try:
+                s = str(s)
+            except Exception:
+                return {}
+        if s.startswith("proxy://"):
+            s = s[len("proxy://"):]
+        out = {}
+        for part in s.split("&"):
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            k = k.strip()
+            v = v.strip()
+            if k in ("url", "u"):
+                v = urllib.parse.unquote(v)
+            out[k] = v
+        return out
 
     # ---------- 搜索 (并发多站合并) ----------
     def searchContent(self, key, quick, pg="1"):
@@ -391,6 +564,83 @@ class Spider(_Base):
             for st in self._alive:
                 out.extend(_one(st))
         return {"list": out, "page": pg}
+
+
+def _bye():
+    _SHUTDOWN[0] = True
+
+
+try:
+    import atexit as _atexit
+    _atexit.register(_bye)
+except Exception:
+    pass
+
+
+# ============ 模块级转发 (TVBox 只认模块级函数, 缺了就整站空白) ============
+_sp = None
+
+
+def _ins():
+    global _sp
+    if _sp is None:
+        _sp = Spider()
+    return _sp
+
+
+def getName():
+    return NAME
+
+
+def init(extend=""):
+    return _ins().init(extend)
+
+
+def homeContent(filter=True):
+    return _ins().homeContent(filter)
+
+
+def homeVideoContent():
+    return _ins().homeVideoContent()
+
+
+def categoryContent(tid, pg, filter=True, extend=None):
+    return _ins().categoryContent(tid, pg, filter, extend or {})
+
+
+def detailContent(ids):
+    return _ins().detailContent(ids)
+
+
+def searchContent(key, quick=False, pg="1"):
+    return _ins().searchContent(key, quick, pg)
+
+
+def playerContent(flag, id, vipFlags=None):
+    return _ins().playerContent(flag, id, vipFlags)
+
+
+def localProxy(param):
+    return _ins().localProxy(param)
+
+
+def isVideoFormat(url):
+    return _is_direct(url)
+
+
+def manualVideoCheck():
+    return False
+
+
+def getDependence():
+    return []
+
+
+def destroy():
+    try:
+        _ins().destroy()
+    except Exception:
+        pass
 
 
 # ============ 自检 ============
@@ -429,14 +679,3 @@ if __name__ == "__main__":
     key = sys.argv[1] if len(sys.argv) > 1 else "流浪地球"
     print("搜索[%s]: %d 条" % (key, len(sp.searchContent(key, False)["list"])))
     print("\n自检完成")
-
-
-def _bye():
-    _SHUTDOWN[0] = True
-
-
-try:
-    import atexit as _atexit
-    _atexit.register(_bye)
-except Exception:
-    pass
