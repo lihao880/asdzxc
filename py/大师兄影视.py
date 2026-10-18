@@ -274,6 +274,90 @@ def _http(url, referer=None, timeout=TIMEOUT, retry=RETRY):
     return ""
 
 
+def _http_bin(url, referer=None, timeout=TIMEOUT, retry=2):
+    """
+    取二进制(图片用)。返回 (bytes, content_type)。
+    ★ 为什么单独写一个: _raw_http 最后会 decode 成 str,
+      jpg 二进制过一遍 utf-8 ignore 就废了, 必须原始字节直接返回。
+    """
+    import re as _re
+    import socket as _socket
+    if not url.startswith("http"):
+        return b"", ""
+    parsed = urllib.parse.urlparse(url)
+    scheme = parsed.scheme or "http"
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+
+    for _ in range(retry):
+        try:
+            s = _socket.create_connection((host, port), timeout=timeout)
+            if scheme == "https":
+                import ssl as _ssl
+                ctx = _ssl.SSLContext(getattr(_ssl, "PROTOCOL_TLS_CLIENT", _ssl.PROTOCOL_TLS))
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl.CERT_NONE
+                s = ctx.wrap_socket(s, server_hostname=host)
+            req = "\r\n".join([
+                "GET %s HTTP/1.1" % path,
+                "Host: %s" % host,
+                "User-Agent: %s" % UA,
+                "Accept: image/*,*/*;q=0.8",
+                "Referer: %s" % (referer or (scheme + "://" + host + "/")),
+                "Connection: close", "", ""])
+            s.sendall(req.encode("utf-8"))
+            buf = []
+            while True:
+                try:
+                    c = s.recv(65536)
+                except Exception:
+                    break
+                if not c:
+                    break
+                buf.append(c)
+            try:
+                s.close()
+            except Exception:
+                pass
+            raw = b"".join(buf)
+            i = raw.find(b"\r\n\r\n")
+            if i < 0:
+                continue
+            head = raw[:i].decode("latin-1", "ignore")
+            body = raw[i + 4:]
+            if "transfer-encoding: chunked" in head.lower():
+                out, pos = [], 0
+                while True:
+                    j = body.find(b"\r\n", pos)
+                    if j < 0:
+                        break
+                    try:
+                        ln = int(body[pos:j].split(b";")[0].strip() or b"0", 16)
+                    except Exception:
+                        break
+                    if ln == 0:
+                        break
+                    seg = body[j + 2:j + 2 + ln]
+                    out.append(seg)
+                    pos = j + 2 + ln + 2
+                    if len(seg) < ln:
+                        break
+                if out:
+                    body = b"".join(out)
+            ct = ""
+            m = _re.search(r"content-type:\s*([^\r\n]+)", head, _re.I)
+            if m:
+                ct = m.group(1).strip()
+            if body:
+                return body, ct
+        except Exception:
+            time.sleep(0.3)
+    return b"", ""
+
+
 # ======================================================================
 # 解析工具
 # ======================================================================
@@ -401,11 +485,23 @@ def _parse_cards(html, strict=True):
         res.append({
             "vod_id": "0$" + ahref,     # ★ 用完整链接当 id, 绕开 /post/ 与 /peixun/ 混用
             "vod_name": atitle,
-            "vod_pic": _abs(apic),
+            "vod_pic": _pic(_abs(apic)),
             "vod_remarks": note,
             "vod_content": actor,
         })
     return res
+
+
+def _pic(u):
+    """
+    海报走本地代理。★ 见 localProxy 里 ptype=="pic" 的注释:
+    本站的图片也做 UA 白名单, 盒子的 OkHttp UA 会吃 404, 海报全空白。
+    """
+    if not u:
+        return ""
+    if not AD_FILTER:
+        return u
+    return "proxy://do=py&type=pic&url=" + urllib.parse.quote(u, safe="")
 
 
 def _abs(u):
@@ -791,7 +887,7 @@ class Spider(object):
         vod = {
             "vod_id": "0$" + url,
             "vod_name": d["name"],
-            "vod_pic": d["pic"],
+            "vod_pic": _pic(d["pic"]),
             "vod_year": d["year"],
             "vod_area": d["area"],
             "vod_remarks": "",
@@ -960,6 +1056,18 @@ class Spider(object):
         if not raw:
             return 400, "text/plain", "no url"
 
+        # ★ 海报走代理。原因: 本站在 UA 里不含 "Mobile" 时, 连 /upload/ 下的图片
+        #   都直接 404(实测 okhttp/3.12.0、Dalvik、python-requests 全是 404/146字节)。
+        #   TVBox 加载海报用的是它自己的 OkHttp UA, 我们改不了 ——
+        #   所以把 vod_pic 换成 proxy://, 由我们带手机 UA 去取, 再原样吐给盒子。
+        if ptype in ("pic", "img", "image"):
+            body, ct = _http_bin(raw, referer=HOST + "/")
+            if not body:
+                return 404, "text/plain", "pic fail"
+            if not ct.startswith("image"):
+                ct = "image/jpeg"
+            return 200, ct, body
+
         if ptype != "m3u8":
             return 404, "text/plain", "not support"
 
@@ -1108,7 +1216,23 @@ if __name__ == "__main__":
         for v in r[:5]:
             print("      -", v["vod_name"])
 
-    print("=== 6. 播放 + 代理 ===")
+    print("=== 6. 海报(必须走代理, 否则盒子全空白) ===")
+    pic_ok = pic_bad = 0
+    for v in (hv[:5] if hv else []):
+        u = v.get("vod_pic") or ""
+        if not u.startswith("proxy://"):
+            pic_bad += 1
+            print("    ! 未包代理:", v["vod_name"], u[:60])
+            continue
+        r = localProxy({"type": "pic", "url": u.split("url=", 1)[1]})
+        if r[0] == 200 and isinstance(r[2], bytes) and r[2][:2] == b"\xff\xd8":
+            pic_ok += 1
+        else:
+            pic_bad += 1
+            print("    ! 取图失败:", v["vod_name"], "status=%s" % r[0])
+    print("    抽测 5 张: 成功 %d, 失败 %d" % (pic_ok, pic_bad))
+
+    print("=== 7. 播放 + 代理 ===")
     if probe:
         dd = detailContent([probe["vod_id"]]).get("list", [])
         if dd:
