@@ -39,6 +39,16 @@
             "api": "https://raw.giteeusercontent.com/haoqiang88/68688/raw/master/js/drpy2.min.js?metadata=eyJyIjoibWFzdGVyIiwiZnAiOiJqcy9kcnB5Mi5taW4uanMiLCJ1aWQiOjEzNzE3NDY0LCJwaWQiOjUwNjMxODc4LCJzdG8iOiJnaXQtc2hhcmRpbmctc3RvLTQydC0wMDQiLCJycCI6InJlcG9zLzIwLzIzLzIwMjM5ZDg3MzQ0NTkzMzE1MzYxODkwYzdiZWRmNjQ4ZTFmYjNjNGUxODVlMzA0ZWY5YzAwNzFkYjQ5NTA4NDEuZ2l0IiwiaXNwIjp0cnVlLCJleHBpcmVfYXQiOjE3OTI1NDgwMDB9&signature=LwEIKPQLrbWK7tgV41ycDyUvF6PI_v8Pv6xCgW8G3fw",
             "ext": "https://raw.giteeusercontent.com/haoqiang88/68688/raw/master/lib/B%E7%AB%99.js?metadata=eyJyIjoibWFzdGVyIiwiZnAiOiJsaWIvQuermS5qcyIsInVpZCI6MTM3MTc0NjQsInBpZCI6NTA2MzE4NzgsInN0byI6ImdpdC1zaGFyZGluZy1zdG8tNDJ0LTAwNCIsInJwIjoicmVwb3MvMjAvMjMvMjAyMzlkODczNDQ1OTMzMTUzNjE4OTBjN2JlZGY2NDhlMWZiM2M0ZTE4NWUzMDRlZjljMDA3MWRiNDk1MDg0MS5naXQiLCJpc3AiOnRydWUsImV4cGlyZV9hdCI6MTc5MjU0NzQwMH0&signature=caDpa9_H3qxoTnlWeRb-6z7jBqQLIvLX0q7LRVPEETg"
         },
+ {
+  "key": "影探4K",
+  "name": "影探4K",
+  "type": 3,
+  "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/影探4K.py",
+  "searchable": 1,
+  "quickSearch": 1,
+  "filterable": 1,
+  "ext": ""
+ },
         {
     "key": "非凡资源",
     "name": "非凡资源.py",
