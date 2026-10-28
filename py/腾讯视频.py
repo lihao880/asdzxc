@@ -75,19 +75,38 @@ DETAIL_API = (API + '/trpc.universal_backend_service.page_server_rpc.PageServer/
 SEARCH_API = API + '/trpc.videosearch.mobile_search.MultiTerminalSearch/MbSearch?vplatform=2'
 
 # ---------------------------------------------------------------
-# 第三方解析接口（实测可用，2026-10-16 逐个验证）
-# 用法：前缀 + 视频页 URL，返回 JSON {"url": "<m3u8 直链>"}
-# 顺序即优先级（按实测速度排序）；任一失败自动切换下一个
-# ⚠ 均为第三方服务，随时可能失效；直链带时效 token，请勿缓存直链本身
+# 腾讯播放核心难点：腾讯视频播放必须带「cKey」签名（AES 加密动态令牌），
+# 该算法在 player.js 里被重度混淆（自定义 base64 字母表 + WASM 级混淆），
+# 且经常变动；纯 Python 爬虫无法稳定复刻，TVBox 的 Python 环境也未必带 Crypto。
+# 因此社区统一做法是「cKey 代理 / 解析接口」：把播放页丢给第三方，它算好 cKey
+# 后回传真实 m3u8/mp4 直链。
+#
+# ⚠ 实测结论（2026-10-26）：下列公开免费接口目前已全部失效 ——
+#   52xiaobai → 403 / niubi → 账户欠费 / qianyi → 解析失败 /
+#   zxy → 404 / gimy → 解析失败 / qq2.php 官方代理 → 超时。
+# 所以本脚本「浏览/搜索/详情」完全正常（你已看到数据），但「播放」在免费接口
+# 下无法出片——这不是脚本逻辑问题，是腾讯的 cKey 墙 + 免费代理全灭。
+#
+# ✅ 你要做的只有一件事：把【当前还活着】的 cKey 代理地址填到下面。
+#   格式：('线路名', '代理前缀?url=')，前缀 + 腾讯播放页URL 即返回直链。
+#   找不到可用免费代理时，最稳的办法是加一个「多线路聚合配置源」代替本蜘蛛
+#   看腾讯（见同目录说明）；或自托管 CSDN 那种 qq.php（需服务器+有效Cookie）。
 # ---------------------------------------------------------------
-PARSE_APIS = [
-    # qianyi —— 实测 1.8s，最快；直链为腾讯自家 CDN
-    'http://8.134.205.252:39466/ceshi/qianyi.php?key=rkd&url=',
-    # 分享者 —— 实测 3.3s
-    'http://zxy-th1.jsszks.dpdns.org:8090/?url=',
-    # gimy —— 实测 3.0s，HTTPS
-    'https://player.gimy.bot/u/parse.php?url=',
+# 每个解析接口一条线路：详情页「线路」处可直接指定用哪个解析播放
+PARSE_LIST = [
+    # 用户提供的两个解析（已实测失效，保留占位，请替换为可用地址）
+ 
+    # 以下为历史可用接口（当前已失效，留作格式参考 / 替换入口）
+    ('千易', 'http://8.134.205.252:39466/ceshi/qianyi.php?key=rkd&url='),
+    ('分享者', 'http://zxy-th1.jsszks.dpdns.org:8090/?url='),
+    ('gimy', 'https://player.gimy.bot/u/parse.php?url='),
+    # 👉 在此追加你找到的可用 cKey 代理，例如：
+    # ('我的代理', 'https://你的代理域名/qq.php?url='),
 ]
+# 「自动」线路 = 依次尝试上面全部
+PARSE_LINES = [('自动', '')] + PARSE_LIST
+_PARSE_MAP = dict(PARSE_LIST)
+PARSE_APIS = [u for _, u in PARSE_LIST]
 
 # 直链缓存时长（秒）。token 会过期，故设很短
 _PARSE_TTL = 300
@@ -147,7 +166,7 @@ def _http(url, data=None, method='GET', timeout=15, tries=3):
     return ''
 
 
-def _post_json(url, obj, timeout=15, tries=3):
+def _post_json(url, obj, timeout=10, tries=1):
     txt = _http(url, json.dumps(obj, ensure_ascii=False), 'POST', timeout, tries)
     if not txt:
         return None
@@ -262,7 +281,7 @@ def _fetch_videos(cid, filter_params, page):
     hit = _ck(key)
     if hit is not None:
         return hit
-    j = _post_json(LIST_API, _list_body(cid, filter_params, page), timeout=20)
+    j = _post_json(LIST_API, _list_body(cid, filter_params, page), timeout=10)
     vods, seen = [], set()
     if j and 'data' in j:
         for p in _iter_params(j):
@@ -322,7 +341,7 @@ def _fetch_filters(cid):
         return hit
 
     dims, order = {}, []
-    j = _post_json(LIST_API, _list_body(cid, 'sort=' + _DEFAULT_SORT, None), timeout=20)
+    j = _post_json(LIST_API, _list_body(cid, 'sort=' + _DEFAULT_SORT, None), timeout=10)
     if j and 'data' in j:
         for p in _iter_params(j):
             k = p.get('index_item_key')
@@ -412,7 +431,7 @@ def _do_search(key, pg):
         'preQid': '', 'adClientInfo': '',
         'extraInfo': {'isNewMarkLabel': '1', 'multi_terminal_pc': '1'},
     }
-    j = _post_json(SEARCH_API, body, timeout=20)
+    j = _post_json(SEARCH_API, body, timeout=10)
     out, seen = [], set()
     if not j:
         return out
@@ -455,7 +474,7 @@ def _fetch_intro(cid):
         },
         'has_cache': 1,
     }
-    j = _post_json(DETAIL_API, body, timeout=20)
+    j = _post_json(DETAIL_API, body, timeout=10)
     info, actors = {}, []
     if not j or 'data' not in j:
         return info, actors
@@ -528,7 +547,7 @@ def _fetch_episodes(cid):
         'cid': str(cid), 'vid': '', 'lid': '', 'page_num': '',
         'page_context': '', 'detail_page_type': '1',
     }
-    j = _post_json(DETAIL_API, {'page_params': dict(base_pp), 'has_cache': 1}, timeout=20)
+    j = _post_json(DETAIL_API, {'page_params': dict(base_pp), 'has_cache': 1}, timeout=10)
     if not j or 'data' not in j:
         _set(key, [], 60)
         return []
@@ -552,7 +571,7 @@ def _fetch_episodes(cid):
                 continue
             pp = dict(base_pp)
             pp['page_context'] = pctx
-            jj = _post_json(DETAIL_API, {'page_params': pp, 'has_cache': 1}, timeout=20)
+            jj = _post_json(DETAIL_API, {'page_params': pp, 'has_cache': 1}, timeout=10)
             if jj and 'data' in jj:
                 eps.extend(_collect_eps(jj['data']))
 
@@ -567,15 +586,16 @@ def _fetch_episodes(cid):
 
 
 # ============================ 第三方解析 ============================
-def _parse_direct(page_url):
-    """依次尝试第三方解析接口，返回可播放的直链；全部失败返回 ''"""
-    key = 'P|' + page_url
+def _parse_direct(page_url, only=''):
+    """解析播放页为直链；only 为线路名时只走该接口，否则依次尝试全部。失败返回 ''"""
+    key = 'P|%s|%s' % (only or 'auto', page_url)
     hit = _ck(key)
     if hit is not None:
         return hit
 
     q = urllib.parse.quote(page_url, safe='')
-    for api in PARSE_APIS:
+    apis = [_PARSE_MAP[only]] if only in _PARSE_MAP else PARSE_APIS
+    for api in apis:
         try:
             txt = _http(api + q, timeout=8, tries=1)
             if not txt:
@@ -631,19 +651,38 @@ class Spider(_BaseSpider):
     def homeContent(self, filter):
         classes = [{'type_id': t, 'type_name': n} for n, t in CLASSES]
         filters = {}
-        for _, tid in CLASSES:
+
+        def _one(tid):
             try:
-                filters[tid] = _fetch_filters(tid)
+                return tid, _fetch_filters(tid)
             except Exception as e:
                 _log('筛选获取失败', tid, repr(e)[:50])
-                filters[tid] = _fallback_filters(tid)
+                return tid, _fallback_filters(tid)
+
+        # 并行拉取 7 个分类的筛选维度，避免串行阻塞导致真机首页超时空白
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=len(CLASSES)) as ex:
+                for tid, f in ex.map(_one, [t for _, t in CLASSES]):
+                    filters[tid] = f
+        except Exception:
+            for _, tid in CLASSES:
+                try:
+                    filters[tid] = _fetch_filters(tid)
+                except Exception:
+                    filters[tid] = _fallback_filters(tid)
         return {'class': classes, 'filters': filters}
 
     def homeVideoContent(self):
-        try:
-            return {'list': _fetch_videos('100113', 'sort=' + _DEFAULT_SORT, 1)[:30]}
-        except Exception:
-            return {'list': []}
+        # 首页推荐：依次尝试各分类，命中任一即返回，避免单分类偶发失败导致首页空白
+        for tid in ('100113', '100173', '100109', '100119', '100105', '100150', '110755'):
+            try:
+                items = _fetch_videos(tid, 'sort=' + _DEFAULT_SORT, 1)[:30]
+                if items:
+                    return {'list': items}
+            except Exception:
+                continue
+        return {'list': []}
 
     # ---------- 分类：全维度筛选 + 翻页 ----------
     def categoryContent(self, tid, pg, filter, extend):
@@ -728,13 +767,15 @@ class Spider(_BaseSpider):
 
         names, urls = [], []
         if main:
-            names.append('腾讯视频')
-            urls.append('#'.join(main))
+            # 每个解析接口一条线路，播放页「线路」处可直接切换自选解析
+            for n, _ in PARSE_LINES:
+                names.append(n)
+                urls.append('#'.join(main))
         if trailer:
-            names.append('预告片')
+            names.append('预告')
             urls.append('#'.join(trailer))
         if not names:
-            names.append('腾讯视频')
+            names.append('自动')
             urls.append('正片$%s@%s' % (cid, cid))
 
         vod = {
@@ -768,8 +809,8 @@ class Spider(_BaseSpider):
         else:
             page_url = '%s/x/cover/%s.html' % (HOST, cid)
 
-        # ① 先试第三方解析接口，能拿到直链就直连播放
-        direct = _parse_direct(page_url)
+        # ① 按所选线路解析：具体线路名只走该接口；「自动」依次尝试全部
+        direct = _parse_direct(page_url, only=flag if flag in _PARSE_MAP else '')
         if direct:
             return {
                 'parse': 0,
@@ -778,7 +819,10 @@ class Spider(_BaseSpider):
                 'header': header,
             }
 
-        # ② 回退：交给框架内置解析器处理（jx=1）
+        # ② 所有解析接口都失效时的兜底：交回框架（jx=1）。
+        #   注意：腾讯播放页本身不是媒体地址，框架也很难直接嗅探出片——
+        #   所以「播放失败」的根因是上面没有可用的 cKey 代理，而不是这里。
+        #   请务必在 PARSE_LIST 里填一个当前可用的 cKey 代理地址。
         return {
             'parse': 1,
             'playUrl': '',
@@ -859,3 +903,32 @@ FALLBACK = {
         ('sort', '排序', [('限免中','90'), ('最新上架','76'), ('最热','75')]),
     ]),
 }
+
+
+# ============================ 本地自检 ============================
+if __name__ == '__main__':
+    sp = Spider()
+    print('名称:', sp.getName())
+    hc = sp.homeContent(True)
+    print('分类:', len(hc['class']), '| 含筛选分类:', len(hc['filters']))
+    hv = sp.homeVideoContent()
+    print('首页推荐:', len(hv['list']),
+          ('| 首条: ' + hv['list'][0]['vod_name']) if hv['list'] else '| (空)')
+    cat = sp.categoryContent('100113', 1, False, {})
+    print('电视剧列表:', len(cat['list']))
+    sr = sp.searchContent('庆余年', False)
+    print('搜索[庆余年]:', len(sr['list']))
+    cid = (cat['list'] or [{}])[0].get('vod_id')
+    if not cid and sr['list']:
+        cid = sr['list'][0]['vod_id']
+    if cid:
+        d = sp.detailContent([cid])['list']
+        if d:
+            eps = (d[0].get('vod_play_url', '') or '').split('#')
+            print('详情:', d[0].get('vod_name'), '| 集数:', len(eps),
+                  '| 线路:', d[0].get('vod_play_from'))
+            pc = sp.playerContent('', eps[0].split('$')[-1], '')
+            print('播放: parse=%s url=%s' % (pc.get('parse'), (pc.get('url') or '')[:50]))
+        else:
+            print('详情: (空)')
+    print('\n自检完成 → 若各项均 >0 说明脚本本身正常；设备上仍空白请检查挂载路径与刷新源')
