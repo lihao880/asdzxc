@@ -2,7 +2,7 @@
 	"wallpaper": "https://tuapi.eees.cc/api.php?category=fengjing&type=302",
 	"homepage": "https://github.com/hjdhnx/hipy-server",
 
-	"spider": "https://gitee.com/easy999/test1/raw/main/easy10.20.png;md5;89e4b4da711039208b57fd5f5d576817",
+	"spider": "https://gitee.com/easy999/test1/raw/main/easy10.30.png;md5;5ac1623ba3b7237beaec4498b68ec37",
 	"sites": [
     
 	{
@@ -14,7 +14,70 @@
     "quickSearch":1,
     "filterable":1
     },
+    {
+            "key": "配置中心",
+            "name": "配置中心",
+            "type": 3,
+            "api": "csp_Config",
+            "searchable": 0,
+            "changeable": 0,
+            "indexs": 0,
+            "style": {
+                "type": "rect",
+                "ratio": 1.618
+            }
+        },
+        {
+            "key": "央视PY",
+            "name": "央视 | 栏目",
+            "type": 3,
+            "api": "https://easy888.dpdns.org/py/央视.py",
+            "searchable": 1,
+            "changeable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "playerType": 2
+        },
+        {
+            "key": "玩偶",
+            "name": "玩偶 | 4K",
+            "type": 3,
+            "api": "csp_Wogg",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "changeable": 1,
+            "ext": {
+                "site": [
+                    "https://www.wogg.live",
+                    "https://woggpan.888484.xyz",
+                    "https://wogg.xxooo.cf",
+                    "https://woggpan.xxooo.cf"
+                ]
+            },
+            "timeout": 60
+        },
 {
+            "key": "鬼片360",
+            "name": "鬼片360.py",
+            "type": 3,
+            "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/鬼片360.py",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1
+        },
+
+        {
+            "key": "鬼片之家",
+            "name": "鬼片之家.py",
+            "type": 3,
+            "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/鬼片之家.py",
+            "searchable": 1,
+            "changeable": 1,
+            "quickSearch": 1,
+            "filterable": 1
+        },
+        {
             "key": "橘汁视频",
             "name": "橘汁视频",
             "type": 3,
@@ -23,16 +86,6 @@
             "quickSearch": 1,
             "filterable": 1
         },
-  {
-  "key": "影探4K",
-  "name": "影探4K",
-  "type": 3,
-  "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/影探4K.py",
-  "searchable": 1,
-  "quickSearch": 1,
-  "filterable": 1,
-  "ext": ""
-},
 {
   "key": "ik4k.py",
   "name": "ik4k.py",
