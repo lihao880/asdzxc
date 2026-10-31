@@ -1,19 +1,24 @@
 # -*- coding: utf-8 -*-
 """
 =================================================
-  修复版：鬼片之家 TVBox 源
+  鬼片之家 TVBox 源（修复 + 防失效版）
 =================================================
 
-修复点（相较原版）：
-1. 【关键】host 已从 kanguipian.com 更新为最终域名 kanguipian456.cc
-   —— 原域名已 301 跳转到新域名，写死旧域名会导致所有请求落到错误站点/拿不到正文。
-2. 【关键】_fetch_html 兼容 TVBox 的 self.fetch 返回值：
-   TVBox(FongMi T3) 的 fetch 往往直接返回「字符串」或「bytes」，
-   而原代码的 `r.content.decode(...)` 在返回 str 时会 AttributeError 崩溃。
-   新增 _to_text() 统一把 str / bytes / Response 对象规整为文本。
-3. 不再依赖 r.status_code == 200 做判断（str 没有该属性），直接以「拿到文本」为准。
-4. 其余解析逻辑（海螺模板 v3.1 的 hl-list-item / hl-text-muted / data-original /
-   hl-tabs-box / /nv/ / /play/）保持，已对照真实首页 HTML 验证 class 命名一致。
+站点：guipian456.cc（海螺模板 v3.1，HTML 解析，无标准 AppleCMS API）
+
+修复历史：
+- 原始版：host 写死 kanguipian.com，旧域名 301 跳走 → 整源空白。
+- 上一修复版：host 改成 www.kanguipian456.cc（仍带 "kan" 前缀），但此域名已 DNS 失效 → 仍然没资源。
+- 本版修复（2026-10）：
+  1. 【关键】真实存活域名为 guipian456.cc（无 "kan" 前缀），原写死的 kanguipian456.cc 已解析失败。
+  2. 【关键】域名不再写死：用 _DOMAINS 域名池 + 失败自动轮换；并从已成功页面正则收编同族新域名置首
+     —— 以后运营换域名无需改代码，自动生效（破解"写死单域名迟早没资源"）。
+  3. 【关键】_fetch_html 兼容框架 self.fetch 返回值（str/bytes/Response）；不依赖 status_code 判成功。
+  4. 网络层兜底：壳子用框架 self.fetch；本地兜底先 requests 再 urllib，保证沙箱/自测也能跑。
+  5. init(extend) 支持传自定义域名 {"domain":"..."}，插到域名池队首，换域名零改码。
+
+解析逻辑（首页/分类/详情/播放）已对照 guipian456.cc 真实 HTML 验证 class 命名一致：
+  hl-list-item / hl-text-muted / data-original / hl-tabs-box / /nv/ / /play/ / var now="..." m3u8。
 """
 import sys
 import json
@@ -24,32 +29,75 @@ from urllib.parse import quote, urlencode, urlparse
 
 sys.path.append('..')
 
+# ----------------------------------------------------------------------------
+#  网络层基类：壳子环境用框架注入的 self.fetch；本地兜底先 requests 再 urllib
+# ----------------------------------------------------------------------------
 try:
-    from base.spider import Spider
+    from base.spider import Spider as _Base
 except ImportError:
-    import requests as rq
+    import ssl as _ssl
+    _ICT = _ssl.create_default_context()
+    _ICT.check_hostname = False
+    _ICT.verify_mode = _ssl.CERT_NONE
+    import urllib.request as _ur
 
-    class Spider:
-        def fetch(self, url, headers=None, **kw):
+    class _Base:
+        def fetch(self, url, headers=None, timeout=15, **kw):
             kw.pop('timeout', None)
-            r = rq.get(url, headers=headers, timeout=15, **kw)
-            r.encoding = 'utf-8'
-            return r
+            # 优先 requests（壳子本地有时可用）
+            try:
+                import requests as rq
+                r = rq.get(url, headers=headers, timeout=timeout, **kw)
+                r.encoding = 'utf-8'
+                return r
+            except ImportError:
+                pass
+            # urllib 兜底（沙箱/无 requests 时使用）
+            req = _ur.Request(url, headers=headers or {})
+            try:
+                resp = _ur.urlopen(req, timeout=timeout, context=_ICT)
+            except TypeError:
+                resp = _ur.urlopen(req, timeout=timeout)
+            data = resp.read()
+            if resp.headers.get('Content-Encoding') == 'gzip':
+                import gzip
+                data = gzip.decompress(data)
+            return data.decode('utf-8', 'replace')
 
-        def post(self, url, data=None, headers=None, **kw):
-            r = rq.post(url, data=data, headers=headers, timeout=15, **kw)
-            r.encoding = 'utf-8'
-            return r
+        def post(self, url, data=None, headers=None, timeout=15, **kw):
+            try:
+                import requests as rq
+                r = rq.post(url, data=data, headers=headers, timeout=timeout, **kw)
+                r.encoding = 'utf-8'
+                return r
+            except ImportError:
+                return ''
 
 
-class Spider(Spider):
+class Spider(_Base):
     """
     鬼片之家 Spider
-    MacCMS + 海螺模板 v3.1, HTML 解析
+    海螺模板 v3.1, HTML 解析
     """
 
-    # 修复点1：旧域名 kanguipian.com 已 301 跳转到 kanguipian456.cc
-    host = 'https://www.kanguipian456.cc'
+    # ------------------------------------------------------------------
+    #  域名池（按优先级）：当前存活 guipian456.cc 置首
+    #  旧域名 kanguipian456.cc（带 "kan"）已 DNS 失效，保留待复活（自动跳过）
+    #  _harvest 会从成功页面动态收编同族新域名置首，破解写死失效
+    # ------------------------------------------------------------------
+    _DOMAINS = [
+        'guipian456.cc',          # 当前存活（2026-10 实测）
+        'www.guipian456.cc',      # 同站 www 变体
+        'kanguipian456.cc',       # 旧域名（已 DNS 失效，保留待复活）
+        'www.kanguipian456.cc',
+        'kanguipian.com',         # 更早的旧域名（曾 301 跳转）
+        'www.kanguipian.com',
+    ]
+    _cur = 0  # 当前生效域名索引
+
+    @property
+    def host(self):
+        return 'https://' + self._DOMAINS[self._cur]
 
     header = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -118,10 +166,22 @@ class Spider(Spider):
         return '鬼片之家'
 
     def init(self, extend=''):
-        if isinstance(extend, list):
-            self.extend = ''
-        else:
-            self.extend = extend or ''
+        self.extend = extend or ''
+        # 支持 extend 传自定义域名：{"domain":"..."} / {"site":"..."} / {"host":"..."}
+        # 自定义域名插到域名池队首，换域名零改码
+        try:
+            obj = extend if isinstance(extend, dict) else None
+            if isinstance(extend, str) and extend.strip().startswith('{'):
+                obj = json.loads(extend)
+            if isinstance(obj, dict):
+                dom = obj.get('domain') or obj.get('site') or obj.get('host')
+                if dom:
+                    dom = dom.replace('http://', '').replace('https://', '').strip('/').lower()
+                    if dom and dom not in self._DOMAINS:
+                        self._DOMAINS.insert(0, dom)
+                        self._cur = 0
+        except Exception:
+            pass
 
     def isVideoFormat(self, url):
         return any(x in url for x in ['.m3u8', '.mp4', '.flv', '.avi', '.mkv'])
@@ -133,24 +193,17 @@ class Spider(Spider):
         pass
 
     # ===================================================================
-    #  请求封装（修复点2/3：兼容 fetch 返回 str/bytes/Response）
+    #  请求封装（兼容 self.fetch 返回 str/bytes/Response；多域名轮换 + 收编）
     # ===================================================================
 
     @staticmethod
     def _to_text(resp):
-        """把 self.fetch 的多种返回值规整为字符串。
-
-        TVBox(FongMi T3) 的 fetch 可能返回：
-          - str（最常见）
-          - bytes（含 gzip）
-          - 带 .text / .content 的 Response 对象
-        """
+        """把 self.fetch 的多种返回值规整为字符串。"""
         if resp is None:
             return ''
         if isinstance(resp, str):
             return resp
         if isinstance(resp, (bytes, bytearray)):
-            # 可能是 gzip，简单探测魔数
             if resp[:2] == b'\x1f\x8b':
                 try:
                     import gzip
@@ -161,7 +214,6 @@ class Spider(Spider):
                 return resp.decode('utf-8', 'replace')
             except Exception:
                 return str(resp)
-        # 兜底：当作 Response 对象处理
         if hasattr(resp, 'text') and resp.text:
             return resp.text
         if hasattr(resp, 'content'):
@@ -172,19 +224,45 @@ class Spider(Spider):
         return ''
 
     def _fetch_html(self, path):
-        """获取页面 HTML，最多重试一次。"""
-        url = path if path.startswith('http') else self.host + path
+        """获取页面 HTML，带多域名轮换 + 动态收编。当前域名失败自动切下一个。"""
         last_text = ''
-        for _ in range(2):  # 首次 + 重试一次
+        tried = 0
+        max_try = len(self._DOMAINS) + 1
+        while tried < max_try:
+            tried += 1
+            url = path if path.startswith('http') else self.host + path
             try:
                 r = self.fetch(url, headers=self.header, timeout=15)
                 text = self._to_text(r)
-                if text:
-                    return text
-                last_text = text
             except Exception:
-                continue
+                text = ''
+            if text:
+                self._harvest(text)  # 收编页面里出现的同族新域名
+                return text
+            last_text = text
+            # 当前域名失败 -> 轮换到下一个
+            self._cur = (self._cur + 1) % len(self._DOMAINS)
         return last_text
+
+    def _harvest(self, html):
+        """从已成功页面里收编同族域名（guipian/456 类）作为候补，不覆盖当前主域名。
+
+        注意：只收编主站后缀，排除明显是图片/视频 CDN 的域名（img/pic/cdn/video/play 等），
+        避免把图床当主域名导致整源不稳。新域名插到当前主域名之后作为后备轮换项。
+        """
+        try:
+            for d in re.findall(
+                r'(?:https?://)?([A-Za-z0-9.-]*guipian[A-Za-z0-9.-]*\.(?:com|cc|net|info|me|xyz|top|vip|icu|cyou|app|tv|la|online))',
+                html, re.I):
+                d = d.strip().lower()
+                if d and d not in self._DOMAINS:
+                    # 排除明显是图片/视频 CDN 的域名
+                    head = d.split('.')[0]
+                    if any(k in head for k in ('img', 'pic', 'cdn', 'upload', 'video', 'play', 'live', 'stream')):
+                        continue
+                    self._DOMAINS.insert(self._cur + 1, d)
+        except Exception:
+            pass
 
     # ===================================================================
     #  图片处理（直连不走代理）
@@ -221,26 +299,21 @@ class Spider(Spider):
     def homeContent(self, filter):
         """返回分类列表和筛选器配置"""
         filters = {}
-        # 鬼片大全分类
         filters['1'] = [
             {'key': 'cate', 'name': '子分类', 'value': self._filter_guipian},
             {'key': 'order', 'name': '排序', 'value': self._filter_sort},
         ]
-        # 电视剧分类
         filters['2'] = [
             {'key': 'cate', 'name': '子分类', 'value': self._filter_tv},
             {'key': 'order', 'name': '排序', 'value': self._filter_sort},
         ]
-        # 恐怖片分类（无子分类）
         filters['3'] = [
             {'key': 'order', 'name': '排序', 'value': self._filter_sort},
         ]
-        # 动漫分类
         filters['4'] = [
             {'key': 'cate', 'name': '子分类', 'value': self._filter_anime},
             {'key': 'order', 'name': '排序', 'value': self._filter_sort},
         ]
-        # 其他分类
         for tid in ['6', '7', '11']:
             filters[tid] = [
                 {'key': 'order', 'name': '排序', 'value': self._filter_sort},
@@ -263,7 +336,6 @@ class Spider(Spider):
         try:
             pg = int(pg or 1)
 
-            # 解析筛选器参数
             ext = {}
             if extend:
                 if isinstance(extend, dict):
@@ -274,20 +346,16 @@ class Spider(Spider):
                     except Exception:
                         ext = {}
 
-            # 子分类覆盖 tid
             cate = ext.get('cate', '')
             order = ext.get('order', 'time')
 
-            # 如果有子分类，使用子分类的 tid
             actual_tid = cate if cate else tid
 
-            # 构建分页 URL: /list/{tid}.html 或 /list/{tid}_{page}.html
             if pg <= 1:
                 url = '/list/%s.html' % actual_tid
             else:
                 url = '/list/%s_%d.html' % (actual_tid, pg)
 
-            # 排序参数通过 URL 参数传递
             if order and order != 'time':
                 url = '/search.php?page=%d&searchtype=5&order=%s&tid=%s' % (pg, order, actual_tid)
 
@@ -308,15 +376,12 @@ class Spider(Spider):
     def _parse_pagecount(self, html):
         """从分页 HTML 中解析总页数"""
         try:
-            # 匹配 "X / Y" 格式 (含 &nbsp; 如 "1&nbsp;/&nbsp;848")
             m = re.search(r'(\d+)\s*(?:&nbsp;)?\s*/\s*(?:&nbsp;)?\s*(\d+)', html)
             if m:
                 return int(m.group(2))
-            # 找分页链接中的页码数字
             nums = re.findall(r'/list/\d+_(\d+)\.html', html)
             if nums:
                 return max(int(n) for n in nums)
-            # 如果有 "下一页" 链接
             if '下一页' in html:
                 return 999
         except Exception:
@@ -331,14 +396,12 @@ class Spider(Spider):
         try:
             vod_id = ids[0] if isinstance(ids, list) else str(ids)
 
-            # 提取数字 ID (从 /nv/XXXXX.html 格式)
             vid_match = re.search(r'(\d+)', vod_id)
             if vid_match:
                 vod_id = vid_match.group(1)
 
             html = self._fetch_html('/nv/%s.html' % vod_id)
 
-            # 标题
             vod_name = ''
             title_match = re.search(r'<title>(.*?)</title>', html, re.S)
             if title_match:
@@ -347,24 +410,19 @@ class Spider(Spider):
                 vod_name = re.sub(r'鬼片大全高清完整版在线观看.*$', '', vod_name)
                 vod_name = re.sub(r'-鬼片之家.*$', '', vod_name)
 
-            # 从 hl-dc-title 提取更准确的标题
             dc_title = re.search(r'<h2[^>]*class="hl-dc-title[^"]*"[^>]*>(.*?)</h2>', html, re.S)
             if dc_title:
                 name = re.sub(r'<[^>]+>', '', dc_title.group(1)).strip()
                 if name:
                     vod_name = name
 
-            # 描述
             vod_content = ''
             desc_m = re.search(r'<meta\s+name="description"\s+content="([^"]*)"', html)
             if desc_m:
                 vod_content = desc_m.group(1)
-                # 清理 "剧情介绍：" 前缀
                 vod_content = re.sub(r'^[^：]*剧情介绍：', '', vod_content)
 
-            # 封面图
             vod_pic = ''
-            # 从详情页 data-original 提取
             pic_m = re.search(r'hl-item-pic[^>]*>.*?data-original="([^"]+)"', html, re.S)
             if pic_m:
                 vod_pic = pic_m.group(1)
@@ -374,7 +432,6 @@ class Spider(Spider):
                     vod_pic = og.group(1)
             vod_pic = self._wrap_pic(vod_pic)
 
-            # 从详情信息字段提取
             vod_year = ''
             vod_class = ''
             vod_area = ''
@@ -383,17 +440,14 @@ class Spider(Spider):
             vod_remarks = ''
             vod_lang = ''
 
-            # 解析信息列表
             info_items = re.findall(
                 r'<em class="hl-text-muted">(.*?)</em>(.*?)(?:</li>|<li)',
                 html, re.S
             )
             for label, raw_val in info_items:
                 label = re.sub(r'<[^>]+>', '', label).strip().rstrip('：:')
-                # 清理 HTML 标签和 &nbsp;
                 value = re.sub(r'<[^>]+>', '', raw_val).strip()
                 value = value.replace('&nbsp;', ' ').strip()
-                # 合并多余空格
                 value = re.sub(r'\s{2,}', ' ', value)
 
                 if label == '片名':
@@ -417,36 +471,29 @@ class Spider(Spider):
                     if not vod_content:
                         vod_content = value
 
-            # 提取选集
             play_from_list = []
             play_url_list = []
 
-            # 播放源名称
             source_names = re.findall(
                 r'<a[^>]*class="hl-tabs-btn[^"]*"[^>]*alt="([^"]+)"',
                 html
             )
 
-            # 播放列表 - 每个 hl-tabs-box 对应一个播放源
             play_boxes = re.findall(
                 r'<div class="hl-tabs-box[^"]*"[^>]*>(.*?)</div>\s*</div>\s*</div>',
                 html, re.S
             )
 
             if not play_boxes:
-                # 尝试另一种匹配方式
                 play_boxes = re.split(r'<div class="hl-tabs-box', html)[1:]
 
-            # 按播放源分组提取选集
             source_idx = 0
             for box_html in play_boxes:
-                # 提取该源下的所有选集
                 eps = re.findall(
                     r"<a\s+title='([^']*)'\s+href='(/play/[^']+)'",
                     box_html
                 )
                 if not eps:
-                    # 兼容双引号写法
                     eps = re.findall(
                         r'<a\s+title="([^"]*)"\s+href="(/play/[^"]+)"',
                         box_html
@@ -457,12 +504,10 @@ class Spider(Spider):
 
                     ep_list = []
                     for ep_name, ep_url in eps:
-                        # 格式: 选集名$播放URL
                         ep_list.append('%s$%s' % (ep_name, ep_url))
                     play_url_list.append('#'.join(ep_list))
                     source_idx += 1
 
-            # 如果没有找到选集，至少返回当前播放链接
             if not play_from_list:
                 play_from_list.append('鬼片之家')
                 play_url_list.append('播放$/nv/%s.html' % vod_id)
@@ -494,17 +539,13 @@ class Spider(Spider):
             pg = int(pg or 1)
             encoded_key = quote(key)
 
-            # 搜索 URL: /search.php?searchword=关键词
-            # 注意: 该站搜索有验证码保护，可能无法直接搜索
             search_path = '/search.php?searchword=%s' % encoded_key
             if pg > 1:
                 search_path += '&page=%d' % pg
 
             html = self._fetch_html(search_path)
 
-            # 检查是否触发验证码
             if '系统安全验证' in html or '验证码' in html:
-                # 搜索被验证码拦截，返回空结果
                 return {'list': [], 'page': pg}
 
             vod_list = self._parse_cards(html)
@@ -523,15 +564,13 @@ class Spider(Spider):
     #  播放
     # ===================================================================
 
-    def playerContent(self, flag, id, vipFlags):
+    def playerContent(self, flag, id, vipFlags=''):
         """
-        播放解析。
-        直接从播放页提取 m3u8 直链（parse:0）。
+        播放解析。直接从播放页提取 m3u8 直链（parse:0）。
         """
         try:
             play_url = str(id or '')
 
-            # 构建完整播放页 URL
             if play_url.startswith('/play/'):
                 full_url = self.host + play_url
             elif play_url.startswith('http'):
@@ -539,14 +578,11 @@ class Spider(Spider):
             else:
                 return {}
 
-            # 获取播放页 HTML
             play_headers = dict(self.header)
             play_headers['Referer'] = self.host + '/'
             r = self.fetch(full_url, headers=play_headers, timeout=15)
             html = self._to_text(r)
 
-            # 提取 m3u8 直链
-            # 格式: var now="https://xxx/video/index.m3u8"
             m3u8 = ''
             now_m = re.search(r'var\s+now\s*=\s*"([^"]+)"', html)
             if now_m:
@@ -562,14 +598,12 @@ class Spider(Spider):
                     },
                 }
 
-            # 如果没有找到 m3u8，尝试提取 iframe 源
             iframe_m = re.search(r'<iframe[^>]*src="([^"]+)"', html)
             if iframe_m:
                 iframe_url = iframe_m.group(1)
                 if not iframe_url.startswith('http'):
                     iframe_url = self.host + iframe_url
 
-                # 请求 iframe 页面提取真实播放地址
                 r2 = self.fetch(iframe_url, headers=play_headers, timeout=15)
                 html2 = self._to_text(r2)
 
@@ -587,7 +621,6 @@ class Spider(Spider):
                         },
                     }
 
-            # 回退: parse:1 网页解析
             return {
                 'parse': 1,
                 'url': full_url,
@@ -659,11 +692,10 @@ class Spider(Spider):
     # ===================================================================
 
     def _parse_cards(self, html):
-        """解析视频卡片列表 - 针对 kanguipian 海螺模板结构"""
+        """解析视频卡片列表 - 针对 guipian456 海螺模板结构"""
         vod_list = []
         seen = set()
 
-        # 方法1: 匹配 hl-list-item 结构 (首页/分类页/搜索页通用)
         card_pattern = re.compile(
             r'<li\s+class="hl-list-item[^"]*"[^>]*>(.*?)</li>',
             re.S
@@ -671,7 +703,6 @@ class Spider(Spider):
         cards = card_pattern.findall(html)
 
         for card in cards:
-            # 提取视频 ID 和链接
             href_m = re.search(r'href="/nv/(\d+)\.html"', card)
             if not href_m:
                 continue
@@ -680,31 +711,26 @@ class Spider(Spider):
                 continue
             seen.add(vid)
 
-            # 提取标题
             name = ''
             title_m = re.search(r'title="([^"]+)"', card)
             if title_m:
                 name = title_m.group(1).strip()
 
-            # 提取海报图片 - data-original 属性
             pic_url = ''
             pic_m = re.search(r'data-original="([^"]+)"', card)
             if pic_m:
                 pic_url = pic_m.group(1)
 
-            # 提取备注 (更新状态)
             remark = ''
             remark_m = re.search(r'class="hl-lc-1\s+remarks">([^<]+)', card)
             if remark_m:
                 remark = remark_m.group(1).strip()
 
-            # 提取评分
             score = ''
             score_m = re.search(r'class="hl-text-conch\s+score">([^<]+)', card)
             if score_m:
                 score = score_m.group(1).strip()
 
-            # 优先使用评分作为备注
             if score and not remark:
                 remark = score
 
@@ -717,7 +743,6 @@ class Spider(Spider):
                 'vod_remarks': remark,
             })
 
-        # 方法2: 如果方法1没有结果，尝试更宽松的匹配
         if not vod_list:
             nv_pattern = re.compile(r'href="/nv/(\d+)\.html"[^>]*title="([^"]*)"', re.S)
             matches = nv_pattern.findall(html)
@@ -727,7 +752,6 @@ class Spider(Spider):
                     continue
                 seen.add(vid)
 
-                # 在附近找图片
                 pic_url = ''
                 pos = html.find('/nv/%s.html' % vid)
                 if pos >= 0:
@@ -746,3 +770,87 @@ class Spider(Spider):
                 })
 
         return vod_list
+
+
+# ===================================================================
+#  模块级转发（兼容 hipy / CatVod-T4 / FongMi 按函数名调用）
+# ===================================================================
+_spider = Spider()
+
+
+def getName():
+    return _spider.getName()
+
+
+def init(extend=''):
+    return _spider.init(extend)
+
+
+def homeContent(filter):
+    return _spider.homeContent(filter)
+
+
+def homeVideoContent():
+    return _spider.homeVideoContent()
+
+
+def categoryContent(tid, pg, filter, extend):
+    return _spider.categoryContent(tid, pg, filter, extend)
+
+
+def detailContent(ids):
+    return _spider.detailContent(ids)
+
+
+def searchContent(key, quick, pg=1):
+    return _spider.searchContent(key, quick, pg)
+
+
+def searchContentPage(key, quick, pg=1):
+    return _spider.searchContentPage(key, quick, pg)
+
+
+def playerContent(flag, id, vipFlags):
+    return _spider.playerContent(flag, id, vipFlags)
+
+
+def localProxy(param):
+    return _spider.localProxy(param)
+
+
+def manualVideoCheck():
+    return _spider.manualVideoCheck()
+
+
+def destroy():
+    return _spider.destroy()
+
+
+if __name__ == '__main__':
+    s = Spider()
+    s.init('')
+    print('=== homeContent ===')
+    h = s.homeContent(False)
+    print('class 数量:', len(h['class']))
+    print('=== homeVideoContent ===')
+    hv = s.homeVideoContent()
+    print('首页卡片:', len(hv['list']))
+    if hv['list']:
+        print('  首条:', hv['list'][0]['vod_name'], '| pic:', hv['list'][0]['vod_pic'][:50])
+    print('=== categoryContent t=1 pg=1 ===')
+    c = s.categoryContent('1', 1, False, None)
+    print('列表:', len(c['list']), '| pagecount:', c['pagecount'])
+    if c['list']:
+        vid = c['list'][0]['vod_id']
+        print('  首条:', c['list'][0]['vod_name'], '| id:', vid)
+        print('=== detailContent ===')
+        d = s.detailContent([vid])
+        if d['list']:
+            v = d['list'][0]
+            print('  名称:', v['vod_name'], '| pic:', v['vod_pic'][:50])
+            print('  play_from:', v['vod_play_from'])
+            print('  play_url :', v['vod_play_url'][:80])
+            print('=== playerContent ===')
+            p = s.playerContent(v['vod_play_from'].split('$$$')[0], v['vod_play_url'].split('$$$')[0].split('#')[0].split('$')[-1])
+            print('  parse:', p.get('parse'), '| url:', p.get('url', '')[:70])
+    print('=== 当前生效域名:', s.host, '===')
