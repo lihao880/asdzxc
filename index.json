@@ -56,6 +56,15 @@
                 ]
             },
             "timeout": 60
+        }, 
+		{
+            "key": "丧尸片",
+            "name": "丧尸片",
+            "type": 3,
+            "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/丧尸片.py",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1
         },
 {
             "key": "鬼片360",
@@ -82,6 +91,15 @@
             "name": "橘汁视频",
             "type": 3,
             "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/橘汁视频.py",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1
+        },
+		{
+            "key": "影探",
+            "name": "影探",
+            "type": 3,
+            "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/影探.py",
             "searchable": 1,
             "quickSearch": 1,
             "filterable": 1
