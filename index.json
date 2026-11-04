@@ -2,7 +2,7 @@
 	"wallpaper": "https://tuapi.eees.cc/api.php?category=fengjing&type=302",
 	"homepage": "https://github.com/hjdhnx/hipy-server",
 
-	"spider": "https://gitee.com/easy999/test1/raw/main/easy10.30.png;md5;5ac1623ba3b7237beaec4498b68ec37",
+	"spider": "https://gitee.com/easy999/test1/raw/main/easy10.20.png;md5;89e4b4da711039208b57fd5f5d576817",
 	"sites": [
     
 	{
@@ -86,6 +86,13 @@
             "quickSearch": 1,
             "filterable": 1
         },
+		{
+  "key": "cj1nym_secure",
+  "name": "青花瓷影视",
+  "type": 3,
+  "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/青花瓷影视_加密版.py",
+  "ext": "{\"key\":\"Lz#2026!qH8vT3$kW9pR\"}"
+},
         {
             "key": "橘汁视频",
             "name": "橘汁视频",
