@@ -1,10 +1,29 @@
 {
-	"wallpaper": "https://tuapi.eees.cc/api.php?category=fengjing&type=302",
-	"homepage": "https://github.com/hjdhnx/hipy-server",
-
-	"spider": "https://gitee.com/easy999/test1/raw/main/easy10.20.png;md5;89e4b4da711039208b57fd5f5d576817",
-	"sites": [
-    
+    "spider": "https://gitee.com/easy999/test1/raw/main/easy10.20.png;md5;89e4b4da711039208b57fd5f5d576817",
+    "wallpaper": "http://127.0.0.1:9978/proxy?do=wallpaper",
+    "logo": "https://pan.gt68.cn/view.php/f0415fd5eb3457d4b897056374a8a5c0.gif",
+    "danmaku": "http://127.0.0.1:9978/proxy?do=danmaku&name={name}&episode={episode}",
+    "sites": [
+        {
+            "key": "豆瓣",
+            "name": "防失联公众号）",
+            "type": 3,
+            "api": "csp_Douban",
+            "searchable": 0
+        },
+        {
+            "key": "配置中心",
+            "name": "配置中心 ",
+            "type": 3,
+            "api": "csp_Config",
+            "searchable": 0,
+            "changeable": 0,
+            "indexs": 0,
+            "style": {
+                "type": "rect",
+                "ratio": 1.618
+            }
+        },
 	{
      "key":"4K资源聚合",
     "name":"4K资源聚合.py",
@@ -15,17 +34,164 @@
     "filterable":1
     },
     {
-            "key": "配置中心",
-            "name": "配置中心",
+            "key": "玩偶",
+            "name": "玩偶 | 4K",
             "type": 3,
-            "api": "csp_Config",
-            "searchable": 0,
-            "changeable": 0,
-            "indexs": 0,
-            "style": {
-                "type": "rect",
-                "ratio": 1.618
-            }
+            "api": "csp_Wogg",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "changeable": 1,
+            "ext": {
+                "site": [
+                    "https://www.wogg.live",
+                    "https://woggpan.888484.xyz",
+                    "https://wogg.xxooo.cf",
+                    "https://woggpan.xxooo.cf"
+                ]
+            },
+            "timeout": 60
+        },
+        {
+            "key": "快映",
+            "name": "快映 | 4K",
+            "type": 3,
+            "api": "csp_PanWebShare",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "changeable": 1,
+            "ext": {
+                "site": [
+                    "http://xsayang.fun",
+                    "http://38.76.197.172:12521"
+                ]
+            },
+            "timeout": 60
+        },
+        {
+            "key": "木偶",
+            "name": "木偶 | 4K",
+            "type": 3,
+            "api": "csp_PanWebShare",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "changeable": 1,
+            "ext": {
+                "site": [
+                    "https://123.666291.xyz",
+                    "https://666.666291.xyz",
+                    "https://www.muou.site",
+                    "https://www.muou.asia"
+                ]
+            },
+            "timeout": 60
+        },
+        {
+            "key": "闪电",
+            "name": "闪电 | 4K",
+            "type": 3,
+            "api": "csp_PanWebShare",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "changeable": 1,
+            "ext": {
+                "site": [
+                    "http://shandian.blog"
+                ]
+            },
+            "timeout": 60
+        },
+        {
+            "key": "蜡笔",
+            "name": "蜡笔 | 4K",
+            "type": 3,
+            "api": "csp_PanWebShare",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "changeable": 1,
+            "ext": {
+                "site": [
+                    "https://www.fmcf.fun",
+                    "https://www.mmpanpan.site",
+                    "http://tvpanpan.site",
+                    "http://www.tvpanpan.site"
+                ]
+            },
+            "timeout": 60
+        },
+        {
+            "key": "多多",
+            "name": "多多 | 4K",
+            "type": 3,
+            "api": "csp_PanWebShare",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "changeable": 1,
+            "ext": {
+                "site": [
+                    "https://tv.yydsys.top",
+                    "https://tv.yydsys.cc",
+                    "https://tv.214521.xyz"
+                ]
+            },
+            "timeout": 60
+        },
+        {
+            "key": "八零",
+            "name": "八零 | 4K",
+            "type": 3,
+            "api": "csp_PanWebShare",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "changeable": 1,
+            "ext": {
+                "site": [
+                    "https://woog.nxog.eu.org",
+                    "https://ogkk.nxog.eu.org",
+                    "https://woog.430520.xyz"
+                ]
+            },
+            "timeout": 60
+        },
+        {
+            "key": "虎斑",
+            "name": "虎斑 | 4K",
+            "type": 3,
+            "api": "csp_PanWebShare",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "changeable": 1,
+            "ext": {
+                "site": [
+                    "http://xhban.xyz",
+                    "http://38.76.197.172:16969"
+                ]
+            },
+            "timeout": 60
+        },
+        {
+            "key": "花卷",
+            "name": "花卷 | 4K",
+            "type": 3,
+            "api": "csp_PanWebShareHJ",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "changeable": 1,
+            "ext": {
+                "site": [
+                    "https://www.hjzhencai.top",
+                    "https://www.huanjuanwp.shop"
+                ]
+            },
+            "timeout": 60
         },
         {
             "key": "央视PY",
