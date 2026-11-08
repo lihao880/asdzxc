@@ -1,9 +1,66 @@
 {
-    "spider": "https://gitee.com/easy999/test1/raw/main/easy10.20.png;md5;89e4b4da711039208b57fd5f5d576817",
-    "wallpaper": "http://127.0.0.1:9978/proxy?do=wallpaper",
-    "logo": "https://pan.gt68.cn/view.php/f0415fd5eb3457d4b897056374a8a5c0.gif",
-    "danmaku": "http://127.0.0.1:9978/proxy?do=danmaku&name={name}&episode={episode}",
-    "sites": [
+	"wallpaper": "https://tuapi.eees.cc/api.php?category=fengjing&type=302",
+	"homepage": "https://github.com/hjdhnx/hipy-server",
+
+	"spider": "./jar/Wogg.jar;md5;c07ab2794d358d27d4a4e842712d3c16",
+	"sites": [
+        
+        {
+            "key": "配置中心",
+            "name": "配置中心 | 官网：easy321.top/jk",
+            "type": 3,
+            "api": "csp_Config",
+            "searchable": 0,
+            "changeable": 0,
+            "indexs": 0,
+            "style": {
+                "type": "rect",
+                "ratio": 1.618
+            }
+        },
+    {
+            "key": "superframe",
+            "name": "超帧设置",
+            "jar": "./jar/Anime4K超帧.jar",
+            "type": 3,
+            "api": "csp_SuperframeSpider"
+        },
+{
+            "key": "玩偶",
+            "name": "玩偶 | 4K",
+            "type": 3,
+            "api": "csp_Wogg",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "changeable": 1,
+            "ext": {
+                "site": [
+                    "https://www.wogg.live",
+                    "https://woggpan.888484.xyz",
+                    "https://wogg.xxooo.cf",
+                    "https://woggpan.xxooo.cf"
+                ]
+            },
+            "timeout": 60
+        },
+        {
+            "key": "快映",
+            "name": "快映 | 4K",
+            "type": 3,
+            "api": "csp_PanWebShare",
+            "searchable": 1,
+            "quickSearch": 1,
+            "filterable": 1,
+            "changeable": 1,
+            "ext": {
+                "site": [
+                    "http://xsayang.fun",
+                    "http://38.76.197.172:12521"
+                ]
+            },
+            "timeout": 60
+        },
 	{
      "key":"4K资源聚合",
     "name":"4K资源聚合.py",
@@ -703,7 +760,7 @@
         {
             "name": "小白解析",
             "type": 1,
-            "url": "https://api.52xiaobai.cn/api/parse.php?token=741e095f8ae92626d78c42223d8d2601&url=",
+            "url": "https://api.52xiaobai.cn/api/parse.php?token=da5f30f63cf6a397f87da88e028d6732&url=",
             "ext": {
                 "header": {
                     "user-agent": "Mozilla/5.0 (Linux; Android 13; V2049A Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/116.0.0.0 Mobile Safari/537.36"
