@@ -2,7 +2,7 @@
 	"wallpaper": "https://tuapi.eees.cc/api.php?category=fengjing&type=302",
 	"homepage": "https://github.com/hjdhnx/hipy-server",
 
-	"spider": "./jar/Wogg.jar;md5;c07ab2794d358d27d4a4e842712d3c16",
+	"spider": "./py/Wogg.jar;md5;c07ab2794d358d27d4a4e842712d3c16",
 	"sites": [
         
         {
