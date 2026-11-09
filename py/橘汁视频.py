@@ -352,20 +352,11 @@ class Spider(_BaseSpider):
         return False
 
     def homeContent(self, filter_):
-        classes = []
-        try:
-            j = self._json_get('/api/v3/drama/getCategory?orderBy=type_id')
-            for it in j.get('data', []):
-                if it.get('name') == '公告':
-                    continue
-                classes.append({'type_name': it.get('name', ''), 'type_id': str(it.get('id', ''))})
-        except Exception:
-            pass
-        wall = []
+        # 一次取 tag/list(解密后含: 分类标签块 typeId/typeName + 推荐墙块 sections.vodList)
+        arr = []
         try:
             j = self._json_get('/api/ex/v3/security/tag/list')
             data = j.get('data', '')
-            arr = []
             if data:
                 try:
                     arr = json.loads(self._decrypt(data)) if self.decrypt != '0' else json.loads(data)
@@ -374,19 +365,37 @@ class Spider(_BaseSpider):
                         arr = json.loads(data)
                     except Exception:
                         arr = []
-            for obj in arr:
-                for sec in obj.get('sections', []) or []:
-                    for v in sec.get('vodList', []) or []:
-                        cid = str(v.get('id', ''))
-                        name = v.get('name', '')
-                        pic = (v.get('coverImage') or {}).get('path', '')
-                        if cid and name:
-                            wall.append({'vod_id': cid, 'vod_name': name,
-                                         'vod_pic': pic, 'vod_remarks': v.get('remark', '')})
         except Exception:
-            pass
-        # 降级: 若推荐墙为空, 用第一个分类的 proto 列表填充, 保证首页有内容
-        if not wall and classes:
+            arr = []
+
+        # 1) 分类标签: 取带 typeId/typeName 的块(旧 getCategory 接口已废, 改从 tag/list 抽)
+        classes = []
+        for obj in arr:
+            tid = obj.get('typeId')
+            nm = obj.get('typeName')
+            if tid and nm and str(nm) != '公告':
+                classes.append({'type_name': str(nm), 'type_id': str(tid)})
+
+        # 2) 静态兜底分类: 即便 tag/list 全挂, 首页也保证有分类标签可点
+        if not classes:
+            for tid, nm in [('21', '剧集'), ('20', '电影'), ('22', '综艺'), ('23', '动漫'),
+                            ('24', '短剧'), ('26', '漫剧'), ('25', '直播')]:
+                classes.append({'type_name': nm, 'type_id': tid})
+
+        # 3) 推荐墙: 遍历各块的 sections.vodList
+        wall = []
+        for obj in arr:
+            for sec in obj.get('sections', []) or []:
+                for v in sec.get('vodList', []) or []:
+                    cid = str(v.get('id', ''))
+                    name = v.get('name', '')
+                    pic = (v.get('coverImage') or {}).get('path', '')
+                    if cid and name:
+                        wall.append({'vod_id': cid, 'vod_name': name,
+                                     'vod_pic': pic, 'vod_remarks': v.get('remark', '')})
+
+        # 4) 降级: 推荐墙为空时, 用第一个分类的 proto 列表填充, 保证首页有内容
+        if not wall:
             try:
                 tid = classes[0]['type_id']
                 raw = self._proto_post('/api/proto/v5/drama/category',
