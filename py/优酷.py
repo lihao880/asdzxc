@@ -1,578 +1,339 @@
 # -*- coding: utf-8 -*-
-# ================================================================
-#  优酷 TVBox / 影视仓 Spider 源（独立版 · 全分类 + 可选筛选 + 4K 解析池）
-# ================================================================
-#  接口来源（2026-10 实测）：
-#    · 分类列表  https://www.youku.com/category/data          （动态筛选定义 + 列表）
-#    · 详情      https://openapi.youku.com/v2/shows/show.json  （开放 API，稳定）
-#    · 剧集      https://openapi.youku.com/v2/shows/videos.json
-#    · 搜索      https://search.youku.com/api/search
-# ================================================================
-#  【播放 · 4K 解析引擎】
-#   1) 优酷 PC 直链接口已加密（__ottreqid / 签名），必须走解析通道。
-#   2) 解析池内置一组【实测可用】接口；探测时自动识别
-#      「停运告别页 / 域名待售页 / 劫持跳转页」等失效特征，失效接口自动跳过。
-#   3) 想用自己的 4K 解析：改下面 PARSERS，或在 TVBox extend 里传：
-#        {"parser":"https://你的解析/?url=", "cookie":"xxx", "use_parser":true}
-#   4) 解析站生命周期普遍很短（数周~数月），失效属常态；
-#      失效时优先替换 PARSERS 里靠前的接口，或改用 extend 自备解析。
-# ================================================================
-#  已知限制（如实说明）：
-#   · 未登录状态下分类【只服务第 1 页】（page>=2 返回空），已做正确收敛。
-#   · 搜索接口返回的 UGC 片段较多，已过滤为结构化影视条目。
-# ================================================================
+# 优酷视频 TVBox py 源 —— 盒端稳定范式版（由 drpy2 版「优酷爬虫.js」等价转写）
+# 放进 ./py2/ 目录，源配置里 api 指向 ./py2/优酷.py 即可。
+#
+# 【2026-11-12 沙箱实测，接口全部存活】
+#   一级/分类: GET https://www.youku.com/category/data?optionRefresh=1&pageNo=<页>
+#              &params=<urlencode 的 {"type":"电视剧","filter":{}}>
+#              -> success:true, data.filterData.listData[] 含 title/img/summary/
+#                 subTitle/videoLink(//v.youku.com/v_nextstage/id_<vid>.html)
+#              实测 电视剧22/电影23/综艺24/动漫24 条；图片 https 直出魔数为真 JPEG。
+#   分页:      裸 pageNo=2 返回非 JSON；必须把 optionRefresh=1 换成
+#              session=<urlencode 的 filterData.session JSON>（实测有效，第二页 32 条）。
+#   详情选集:  GET https://search.youku.com/api/search?appScene=show_episode&showIds=<vid>
+#              -> serisesList[] 含 videoId/displayName/showVideoStage/url；
+#              用分类列表 videoLink 里的 vid 才拿到"优酷"自家选集（实测 19/30 集）。
+#   搜索:      GET https://search.youku.com/api/search?pg=<页>&keyword=<kw>
+#              ★不要带 appScene=show_episode★（会返回选集结构而非结果列表 -> 空白）
+#              -> pageComponentList[].commonData 含 titleDTO/posterDTO/showId。
+#   播放:      v.youku.com/v_show/id_<videoId>.html 等官网播放页；
+#              第三方解析站已全失效，不做本地直链解析，统一 jx:1 交给壳。
+#
+# 【历史坑，本次转写时全部规避】
+#   1) 内置几年前的死会话 Cookie 会触发 403/人机验证 -> 只用 UA + Referer，不带 Cookie。
+#   2) 上游触发人机验证返回 HTML 时 JSON.parse 会抛错刷屏 -> 首字符非 '{' 直接跳过。
+#   3) 搜索结果里的 showId 有可能是外站版权（如"庆余年"落到腾讯），
+#      详情按 sourceName 判断：优酷自家拼 v_show，外站用 serisesList[].url。
+#
+# 【盒端稳定范式】纯 urllib；无 requests / 无线程 / 无 localProxy / 无 __getattr__；
+#   6s 超时；所有网络与解析 try/except 包住，异常绝不冒泡，失败返回空结构；
+#   session 与卡片信息只放纯内存 dict，重启丢失也不影响首页/分类/搜索出数据。
+#
+# 【ext 可选项】默认播放用 jx:1。若你的壳不认 jx 字段，
+#   在源 ext 填 {"parse":1,"jx":0} 改走壳嗅探/官方解析；填 {"parse":0,"jx":1} 恢复默认。
 
-import sys
 import json
-import re
-import time
-import random
+import base64
+import gzip
+import ssl
+import urllib.parse
+import urllib.request
 
 try:
-    from urllib.parse import quote, quote_plus, urlencode
+    from base.spider import Spider as _BaseSpider
 except Exception:
-    from urllib import quote, quote_plus, urlencode
+    class _BaseSpider:
+        pass
 
-try:
-    from urllib.request import Request, urlopen
-    from urllib.error import HTTPError, URLError
-except Exception:
-    from urllib2 import Request, urlopen, HTTPError, URLError
+_CTX = ssl._create_unverified_context()
+UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+_HEADERS = {'User-Agent': UA, 'Accept': '*/*',
+            'Accept-Language': 'zh-CN,zh;q=0.9'}
 
-try:
-    import requests
-except Exception:
-    requests = None
+_HOST = 'https://www.youku.com'
+_CAT_API = 'https://www.youku.com/category/data'
+_SEARCH_API = 'https://search.youku.com/api/search'
+_EPISODE_API = 'https://search.youku.com/api/search?appScene=show_episode&showIds='
 
-DEBUG = False
+# 分类名即接口 params.type（中文），全部为官网现用分类
+CHANNELS = ['电视剧', '电影', '综艺', '动漫', '少儿', '纪录片', '文化',
+            '亲子', '教育', '搞笑', '生活', '体育', '音乐', '游戏']
 
-# ================================================================
-#  基础常量
-# ================================================================
-UA_PC = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-UA_M = ("Mozilla/5.0 (Linux; Android 12; Pixel 6 Build/SQ3A.220705.004; wv) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/106.0.5249.126 "
-        "Mobile Safari/537.36")
-REF = "https://www.youku.com/"
-
-# 优酷开放 API 的公开 client_id（网页端公开值）
-CLIENT_ID = "53e6cc67237fc59a"
-
-# 分类目录（type_id -> 显示名；type_id 同时作为接口 category / type 参数）
-CLASSES = [
-    ("电视剧", "电视剧"),
-    ("电影", "电影"),
-    ("综艺", "综艺"),
-    ("动漫", "动漫"),
-    ("纪录片", "纪录片"),
-    ("少儿", "少儿"),
-    ("文化", "文化"),
-    ("亲子", "亲子"),
-    ("教育", "教育"),
-    ("搞笑", "搞笑"),
-    ("生活", "生活"),
-    ("体育", "体育"),
-]
-
-# ================================================================
-#  4K 解析引擎（统一配置）
-# ================================================================
-#   说明：
-#    1) 解析站的清晰度由【服务端】决定，客户端 py 只能"择优挑选 + 正确传参"，
-#       无法强制某个站返回 4K。故这里给一组【实测可用】的接口池，按可用性择优。
-#    2) 想用自己的 4K 解析：改下面的 PARSERS，或写进 TVBox 自定义 extend：
-#         {"parser": "https://你的解析/?url=", "cookie": "xxx"}
-#    3) 优酷 PC 直连接口已签名，故必须走解析通道。
-#    4) 【自动淘汰】探测会识别"停运告别页/域名待售页/劫持跳转页"，失效接口自动跳过。
-#    5) 解析站生命周期短（数周~数月），失效是常态——优先替换靠前接口或用 extend 自备。
-# ================================================================
-PARSERS = [
-    # ===== 实测可用（2026-10 复测）=====
-    # —— 优先：通用云解析，页面带真实解析逻辑，多平台通吃 ——
-    "https://yparse.ik9.cc/?url=",
-    "https://yemu.xyz/?url=",
-    "https://jx.hongshu.net/?url=",
-    "https://bd.jx.cn/?url=",
-    "https://jx.777jiexi.com/player/?url=",
-    # —— 备用：结构正常的通用解析页 ——
-    "https://okjx.cc/?url=",
-    "https://jx.wannengjiexi.com/?url=",
-    "https://jx.h8jx.com/?url=",
-    "https://www.playm3u8.cn/jiexi.php?url=",
-    # —— 兜底：域内跳转型（自动跟随到活线）——
-    "https://jx.yparse.com/?url=",
-]
-# 是否启用解析通道（False 则只走播放页）
-USE_PARSER = True
-# 解析请求头：部分接口靠 UA/Referer 决定清晰度，这里用移动端 UA 更易命中高码率
-PARSER_UA = UA_M
-# 可选 Cookie（部分解析站/平台靠登录态解锁 4K）。留空则不发送。
-COOKIE = ""
+# showId -> 卡片信息（详情兜底，纯内存）
+_META = {}
+# 分类名 -> session JSON 字符串（分页用，纯内存）
+_SESS = {}
+# 播放返回参数（可由 init 的 ext 覆盖）
+_PLAY = {'parse': 0, 'jx': 1}
 
 
-def _log(*a):
-    if DEBUG:
-        try:
-            print("[优酷]", " ".join([str(x) for x in a]))
-        except Exception:
-            pass
-
-
-def _q(s):
-    """URL 编码（保留 :// 与常见安全字符，兼容 Jython2）"""
+def _fetch(url, ref=None, timeout=6):
+    """极简 GET：只用 urllib，超时 6s，失败返回空串，异常绝不冒泡。"""
     try:
-        return quote(str(s or ""), safe="")
+        h = dict(_HEADERS)
+        if ref:
+            h['Referer'] = ref
+        req = urllib.request.Request(url, headers=h)
+        with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as r:
+            raw = r.read()
+            if r.headers.get('Content-Encoding') == 'gzip':
+                try:
+                    raw = gzip.decompress(raw)
+                except Exception:
+                    pass
+            return raw.decode('utf-8', 'replace')
     except Exception:
-        return quote(str(s or ""))
+        return ''
 
 
-def _http(method, url, headers=None, body=None, timeout=15):
-    """统一 HTTP 请求：优先 requests，退化 urllib（兼容 Jython/Py2/Py3）"""
-    hdrs = {"User-Agent": UA_PC, "Accept": "*/*", "Referer": REF}
-    if headers:
-        hdrs.update(headers)
-
-    if requests is not None:
-        try:
-            if method.upper() == "POST":
-                r = requests.post(url, headers=hdrs, data=body, timeout=timeout, verify=False)
-            else:
-                r = requests.get(url, headers=hdrs, timeout=timeout, verify=False)
-            return r.status_code, r.text
-        except Exception:
-            pass
-
-    # urllib 兜底
-    try:
-        req = Request(url, data=body, headers=hdrs)
-        resp = urlopen(req, timeout=timeout)
-        code = resp.getcode() if hasattr(resp, "getcode") else 200
-        raw = resp.read()
-        try:
-            txt = raw.decode("utf-8", "ignore")
-        except Exception:
-            txt = raw
-        return code, txt
-    except HTTPError as e:
-        try:
-            return e.code, e.read().decode("utf-8", "ignore")
-        except Exception:
-            return e.code, ""
-    except Exception as e:
-        _log("http err", e)
-        return 0, ""
-
-
-def _jload(txt):
-    try:
-        return json.loads(txt)
-    except Exception:
-        # 容错：_INITIAL_DATA__ 里存在 undefined 等非法 JSON 片段
-        try:
-            fixed = (txt or "").replace(":undefined", ":null").replace("undefined", "null")
-            return json.loads(fixed)
-        except Exception:
-            return {}
-
-
-def _s(v, d=""):
-    if v is None:
-        return d
-    try:
-        return str(v)
-    except Exception:
-        return d
-
-
-def _pick(d, *keys):
-    """从 dict 里按顺序取第一个非空值"""
-    if not isinstance(d, dict):
-        return None
-    for k in keys:
-        if d.get(k) not in (None, "", [], {}):
-            return d.get(k)
-    return None
-
-
-def _img(u):
-    """补全封面 URL"""
-    u = _s(u)
-    if not u:
-        return ""
-    if u.startswith("//"):
-        return "https:" + u
+def _https(u):
+    u = (u or '').strip()
+    if u.startswith('//'):
+        return 'https:' + u
+    if u.startswith('http://'):
+        return 'https://' + u[7:]
     return u
 
 
-class Spider(object):
-    """优酷 Spider"""
+def _vid_of(u):
+    """播放页 URL -> 安全 vod_id / play_url 段（避开 $ # & ? 分隔符）。"""
+    try:
+        return base64.urlsafe_b64encode(u.encode('utf-8')).decode('ascii').rstrip('=')
+    except Exception:
+        return u
 
-    def __init__(self):
-        self.extend = ""
-        # 解析引擎配置
-        self.parsers = list(PARSERS)
-        self.use_parser = USE_PARSER
-        self.parser_ua = PARSER_UA
-        self.cookie = COOKIE
-        self.force_parser = ""
-        self._probe = {}
-        # 通用配置
-        self.hdr = {"User-Agent": UA_PC, "Referer": REF}
 
-    # ---------------- 生命周期 ----------------
-    def init(self, extend=""):
-        self.extend = extend or ""
-        if self.extend:
-            try:
-                cfg = _jload(self.extend) if isinstance(self.extend, str) else self.extend
-                if isinstance(cfg, dict):
-                    # 解析池自定义
-                    pp = cfg.get("parser") or cfg.get("jx")
-                    if pp:
-                        self.force_parser = _s(pp)
-                    ps = cfg.get("parsers")
-                    if isinstance(ps, list) and ps:
-                        self.parsers = [_s(x) for x in ps if x]
-                    if cfg.get("cookie") is not None and _s(cfg.get("cookie")):
-                        self.cookie = _s(cfg.get("cookie"))
-                        self.hdr["Cookie"] = self.cookie
-                    if cfg.get("use_parser") is not None:
-                        self.use_parser = bool(cfg.get("use_parser"))
-                    if cfg.get("ua"):
-                        self.parser_ua = _s(cfg.get("ua"))
-            except Exception as e:
-                _log("init err", e)
+def _url_of(v):
+    s = str(v or '').strip()
+    if s.startswith('http'):
+        return s
+    try:
+        return base64.urlsafe_b64decode(s + '=' * (-len(s) % 4)).decode('utf-8')
+    except Exception:
+        return ''
+
+
+def _q(s):
+    return urllib.parse.quote(s, safe='')
+
+
+def _cat_url(typ, pg, sess=''):
+    params = _q(json.dumps({'type': typ, 'filter': {}},
+                           ensure_ascii=False, separators=(',', ':')))
+    if pg > 1 and sess:
+        return '%s?session=%s&pageNo=%s&params=%s' % (_CAT_API, _q(sess), pg, params)
+    return '%s?optionRefresh=1&pageNo=%s&params=%s' % (_CAT_API, pg, params)
+
+
+def _category_list(typ, pg):
+    """返回 (卡片数组, 本分类 session JSON)。非 JSON(人机验证) 时安全跳过。"""
+    sess = _SESS.get(typ, '')
+    # 翻页但还没缓存 session 时，先静默拉一次第一页把 session 取回来
+    if pg > 1 and not sess:
+        _category_list(typ, 1)
+        sess = _SESS.get(typ, '')
+    txt = _fetch(_cat_url(typ, pg, sess), _HOST + '/')
+    out = []
+    if not txt or txt.lstrip()[:1] != '{':
+        return out, sess
+    try:
+        j = json.loads(txt)
+        fd = ((j.get('data') or {}).get('filterData') or {})
+        s = fd.get('session')
+        if s:
+            sess = json.dumps(s, ensure_ascii=False, separators=(',', ':'))
+            _SESS[typ] = sess
+        for it in (fd.get('listData') or []):
+            vl = str(it.get('videoLink') or '')
+            if 'id_' not in vl:
+                continue
+            sid = vl.split('id_', 1)[1].split('.html', 1)[0]
+            if not sid:
+                continue
+            name = str(it.get('title') or '').strip()
+            if not name:
+                continue
+            pic = _https(it.get('img') or '')
+            desc = str(it.get('summary') or it.get('subTitle') or '').strip()
+            remark = str(it.get('rightTagText') or it.get('subTitle') or '').strip()
+            _META[sid] = {'vod_name': name, 'vod_pic': pic,
+                          'vod_content': desc, 'vod_remarks': remark}
+            out.append({'vod_id': sid, 'vod_name': name,
+                        'vod_pic': pic, 'vod_remarks': remark})
+    except Exception:
+        pass
+    return out, sess
+
+
+def _search_list(kw, pg):
+    txt = _fetch('%s?pg=%s&keyword=%s' % (_SEARCH_API, pg, _q(kw)), _HOST + '/')
+    out = []
+    if not txt or txt.lstrip()[:1] != '{':
+        return out
+    try:
+        j = json.loads(txt)
+        for comp in (j.get('pageComponentList') or []):
+            cd = comp.get('commonData') or {}
+            if not cd:
+                continue
+            sid = str(cd.get('showId') or cd.get('realShowId') or '')
+            if not sid:
+                continue
+            name = str((cd.get('titleDTO') or {}).get('displayName')
+                       or cd.get('title') or '').strip()
+            if not name:
+                continue
+            pic = _https((cd.get('posterDTO') or {}).get('vThumbUrl')
+                         or cd.get('sourceImg') or '')
+            desc = str(cd.get('stripeBottom') or '').strip()
+            content = '%s %s' % (cd.get('updateNotice') or '', cd.get('feature') or '')
+            _META[sid] = {'vod_name': name, 'vod_pic': pic,
+                          'vod_content': content.strip(), 'vod_remarks': desc}
+            out.append({'vod_id': sid, 'vod_name': name,
+                        'vod_pic': pic, 'vod_remarks': desc})
+        # 兼容上游改回"选集"结构（无 pageComponentList 但顶层有 showId）
+        if not out and j.get('showId'):
+            sid = str(j.get('showId'))
+            _META[sid] = {'vod_name': kw, 'vod_pic': '',
+                          'vod_content': str(j.get('sourceName') or '优酷'),
+                          'vod_remarks': ''}
+            out.append({'vod_id': sid, 'vod_name': kw,
+                        'vod_pic': '', 'vod_remarks': str(j.get('sourceName') or '优酷')})
+    except Exception:
+        pass
+    return out
+
+
+class Spider(_BaseSpider):
 
     def getName(self):
-        return "优酷"
+        return '优酷视频'
 
-    def isVideoFormat(self, url):
-        return bool(re.search(r"\.(m3u8|mp4|flv|mkv|webm)(\?|$)", _s(url)))
+    def init(self, extend=""):
+        # 极简 ext：只切换播放方式，不探活、不开线程
+        try:
+            ext = (extend or '').strip()
+            if ext.startswith('{'):
+                c = json.loads(ext)
+                if 'parse' in c:
+                    _PLAY['parse'] = 1 if str(c.get('parse')) == '1' else 0
+                if 'jx' in c:
+                    _PLAY['jx'] = 1 if str(c.get('jx')) == '1' else 0
+        except Exception:
+            pass
+        return None
+
+    def _classes(self):
+        return [{'type_id': n, 'type_name': n} for n in CHANNELS]
+
+    def homeContent(self, filter=False):
+        try:
+            lst, _ = _category_list('电视剧', 1)
+            return {'class': self._classes(), 'list': lst}
+        except Exception:
+            return {'class': self._classes(), 'list': []}
+
+    def homeVideoContent(self):
+        return self.homeContent()
+
+    def categoryContent(self, tid='电视剧', pg='1', filter=False, extend=None):
+        try:
+            p = int(pg or 1)
+        except Exception:
+            p = 1
+        typ = str(tid or '电视剧')
+        if typ not in CHANNELS:
+            typ = '电视剧'
+        lst, _ = _category_list(typ, p)
+        return {'list': lst, 'page': p, 'pagecount': 99999,
+                'limit': 20, 'total': 999999}
+
+    def detailContent(self, ids):
+        sid = str(ids[0]) if isinstance(ids, (list, tuple)) and ids else str(ids)
+        if not sid:
+            return {'list': []}
+        txt = _fetch(_EPISODE_API + _q(sid), _HOST + '/')
+        eps = []
+        source = ''
+        if txt and txt.lstrip()[:1] == '{':
+            try:
+                j = json.loads(txt)
+                source = str(j.get('sourceName') or '')
+                for it in (j.get('serisesList') or []):
+                    page = ''
+                    if '优酷' in source or str(j.get('isYouku') or '') == '1':
+                        v = str(it.get('videoId') or '')
+                        if v:
+                            page = 'https://v.youku.com/v_show/id_%s.html' % v
+                    if not page:
+                        page = str(it.get('url') or '')
+                    if not page.startswith('http'):
+                        continue
+                    stage = str(it.get('showVideoStage') or '').replace('期', '集')
+                    dn = str(it.get('displayName') or '')
+                    # 外站版权常只有纯数字序号，补成"第N集"更易读
+                    if not stage and dn.isdigit():
+                        stage = '第%s集' % dn
+                    title = (stage or dn or str(it.get('title') or '') or '正片').strip()
+                    eps.append((title, page))
+            except Exception:
+                pass
+        # 选集接口偶发空/被拦：至少给一条可点入口，不让详情空白
+        if not eps:
+            eps = [('正片', 'https://v.youku.com/v_show/id_%s.html' % sid)]
+        m = _META.get(sid, {})
+        name = m.get('vod_name') or (eps[0][0] if eps else '优酷')
+        # 外站版权（如"庆余年"落到腾讯）在线路名上如实标注，避免误以为优酷自家源
+        play_from = '优酷' if (not source or '优酷' in source) else source
+        return {'list': [{
+            'vod_id': sid,
+            'vod_name': name,
+            'vod_pic': m.get('vod_pic') or '',
+            'vod_content': m.get('vod_content') or '优酷官网播放页，由壳解析播放',
+            'vod_remarks': m.get('vod_remarks') or source,
+            'type_name': source,
+            'vod_play_from': play_from,
+            'vod_play_url': '#'.join('%s$%s' % (t, _vid_of(u)) for t, u in eps),
+        }]}
+
+    def searchContent(self, key='', quick=False, pg='1'):
+        try:
+            p = int(pg or 1)
+        except Exception:
+            p = 1
+        kw = str(key or '').strip()
+        out = _search_list(kw, p) if kw else []
+        return {'list': out, 'page': p, 'pagecount': 99999,
+                'limit': len(out), 'total': 999999}
+
+    def playerContent(self, flag='', id='', vipFlags=None):
+        try:
+            page = _url_of(id)
+            if not page.startswith('http'):
+                return {'parse': 0, 'url': '', 'jx': 0}
+            return {'parse': _PLAY['parse'], 'jx': _PLAY['jx'], 'url': page,
+                    'header': {'User-Agent': UA, 'Referer': 'https://v.youku.com/'}}
+        except Exception:
+            return {'parse': 0, 'url': '', 'jx': 0}
 
     def manualVideoCheck(self):
-        return False
-
-    def localProxy(self, param):
         return None
+
+    def isVideoFormat(self, url):
+        return False
 
     def destroy(self):
         return None
 
-    # ---------------- 分类接口 ----------------
-    def _cat_url(self, cate, page, extra):
-        """构造分类列表请求 URL。"""
-        params = {"category": cate, "type": cate}
-        if extra:
-            for k, v in extra.items():
-                if v not in (None, "", []):
-                    params[k] = v
-        u = ("https://www.youku.com/category/data?optionRefresh=1&pageNo=%d&params=%s"
-             % (int(page or 1), _q(json.dumps(params, ensure_ascii=False))))
-        return u
+    def close(self):
+        return None
 
-    def _fetch_cat(self, cate, page, extra):
-        """返回 (listData, filterDims, hasMore)"""
-        u = self._cat_url(cate, page, extra)
-        st, txt = _http("GET", u, headers=self.hdr, timeout=15)
-        if not st or not txt:
-            return [], [], False
-        d = _jload(txt)
-        fd = ((d.get("data") or {}).get("filterData") or {})
-        return (fd.get("listData") or [],
-                ((fd.get("filter") or {}).get("filterData") or []),
-                bool(fd.get("hasMore")))
+    def getDependence(self):
+        return []
 
-    def _parse_filter(self, dims):
-        """把接口返回的筛选定义转成 TVBox filters 结构。"""
-        filters = []
-        for dim in dims or []:
-            subs = dim.get("subFilter") or []
-            if not subs:
-                continue
-            ftype = None
-            values = []
-            for s in subs:
-                ft = _s(s.get("filterType"))
-                if ft and not ftype:
-                    ftype = ft
-                title = _s(s.get("title"))
-                val = s.get("value")
-                val = "" if val in (None, "NON") else _s(val)
-                if title == "" or title.startswith("全部") or title == "综合排序":
-                    val = ""
-                values.append({"n": title, "v": val})
-            if not ftype or not values:
-                continue
-            # 首项保证是「全部」
-            if values[0].get("v") != "":
-                values.insert(0, {"n": "全部", "v": ""})
-            filters.append({"key": ftype, "name": ftype, "value": values})
-        # 中文显示名映射（key -> 友好名）
-        NAME_MAP = {
-            "type": "类型", "main_area": "地区", "tags": "剧情", "year": "年份",
-            "status": "规格", "pay_type": "付费", "sort": "排序", "theatre": "剧场",
-            "tag_label_name": "标签",
-        }
-        for f in filters:
-            f["name"] = NAME_MAP.get(f["key"], f["key"])
-        return filters
+    def proxy(self, param):
+        return None
 
-    # ---------------- 内容接口 ----------------
-    def homeContent(self, filter=False):
-        classes = [{"type_id": tid, "type_name": name} for tid, name in CLASSES]
-        out = {"class": classes}
-        # 筛选按分类首次请求时的返回动态生成
-        if filter:
-            # 用第一个分类的筛选做示例；各分类 lebel 结构不同，逐个补充
-            filters = {}
-            for tid, _ in CLASSES:
-                _, dims, _ = self._fetch_cat(tid, 1, None)
-                filters[tid] = self._parse_filter(dims)
-            out["filters"] = filters
-        return out
-
-    def homeVideoContent(self):
-        items, _, _ = self._fetch_cat("电视剧", 1, None)
-        return {"list": [self._vod(it) for it in items]}
-
-    def _vod(self, it):
-        """列表条目 -> TVBox vod 结构"""
-        link = _s(_pick(it, "videoLink", "link", "url"))
-        vid = self._extract_sid(link) or _s(_pick(it, "showId", "id"))
-        title = _s(_pick(it, "title", "name"))
-        return {
-            "vod_id": vid,
-            "vod_name": title,
-            "vod_pic": _img(_pick(it, "img", "poster", "thumbnail")),
-            "vod_remarks": _s(_pick(it, "summary", "rightTagText", "subTitle")),
-        }
-
-    def _extract_sid(self, link):
-        """从各种链接里抽出 show id（优酷 id 是 20 位十六进制）"""
-        link = _s(link)
-        m = re.search(r"id_([0-9a-fA-F]{16,})\.html", link)
-        if m:
-            return m.group(1)
-        m = re.search(r"/(?:show|nextstage)[/_]([0-9a-fA-F]{16,})", link)
-        if m:
-            return m.group(1)
-        m = re.search(r"showId=([0-9a-fA-F]{16,})", link)
-        if m:
-            return m.group(1)
-        return ""
-
-    def categoryContent(self, tid, pg, filter, extend):
-        pg = int(pg or 1)
-        # 未登录时接口仅服务第 1 页
-        if pg > 1:
-            return {"list": [], "page": pg, "pagecount": pg, "limit": 24, "total": 0}
-        extra = {}
-        if isinstance(extend, dict):
-            for k, v in extend.items():
-                if v not in (None, "", []):
-                    extra[k] = v
-        items, _, has_more = self._fetch_cat(tid, 1, extra)
-        lst = [self._vod(it) for it in items]
-        pagecount = 1
-        if has_more:
-            pagecount = 9999  # 理论可翻页，但未登录实际拿不到第 2 页
-        return {"list": lst, "page": pg, "pagecount": pagecount,
-                "limit": 24, "total": 24 if has_more else len(lst)}
-
-    def detailContent(self, ids):
-        sid = ""
-        if ids:
-            sid = _s(ids[0])
-        sid = self._extract_sid(sid) or sid
-        if not sid:
-            return {"list": []}
-
-        # 详情（开放 API）
-        du = ("https://openapi.youku.com/v2/shows/show.json?client_id=%s&show_id=%s"
-              % (CLIENT_ID, sid))
-        st, txt = _http("GET", du, headers=self.hdr, timeout=15)
-        info = _jload(txt) if st else {}
-
-        # 剧集列表（开放 API）
-        eu = ("https://openapi.youku.com/v2/shows/videos.json?client_id=%s&show_id=%s&count=100"
-              % (CLIENT_ID, sid))
-        st2, txt2 = _http("GET", eu, headers=self.hdr, timeout=15)
-        eps = (_jload(txt2).get("videos") or []) if st2 else []
-
-        name = _s(_pick(info, "name", "title")) or sid
-        # 演员 / 导演
-        actors = []
-        attr = info.get("attr") or {}
-        for a in (attr.get("director") or []):
-            nm = _s(a.get("name"))
-            if nm:
-                actors.append("导演:" + nm)
-        for a in (attr.get("performer") or attr.get("actor") or []):
-            nm = _s(a.get("name"))
-            if nm:
-                actors.append(nm)
-        if not actors:
-            actors = []
-        # 更多信息
-        extra_bits = []
-        area = _s(info.get("area"))
-        genre = _s(info.get("genre"))
-        year = _s(info.get("published"))[:4]
-        if year:
-            extra_bits.append(year)
-        if area:
-            extra_bits.append(area)
-        if genre:
-            extra_bits.append(genre)
-        ep_cnt = _s(info.get("episode_count"))
-        if ep_cnt:
-            extra_bits.append(ep_cnt + "集")
-
-        # 播放列表：一集一集
-        play_urls = []
-        for e in eps:
-            t = _s(_pick(e, "title", "name")) or ("第%s集" % _s(e.get("seq")))
-            lk = _s(_pick(e, "link", "url"))
-            # 取出 video id 作为播放标识
-            m = re.search(r"id_([A-Za-z0-9=+/]+)\.html", lk)
-            vid = m.group(1) if m else lk
-            if vid:
-                play_urls.append("%s$%s" % (t, vid))
-        if not play_urls:
-            # 兜底：用详情里的 play_link
-            pl = _s(_pick(info, "play_link"))
-            m = re.search(r"id_([A-Za-z0-9=+/]+)\.html", pl)
-            if m:
-                play_urls.append("%s$%s" % (name, m.group(1)))
-
-        vod = {
-            "vod_id": sid,
-            "vod_name": name,
-            "vod_pic": _img(_pick(info, "poster_large", "poster", "thumbnail_large")),
-            "vod_year": year,
-            "vod_area": area,
-            "vod_actor": " / ".join(actors[:12]),
-            "vod_director": " / ".join([_s(a.get("name")) for a in (attr.get("director") or [])]),
-            "vod_content": _s(_pick(info, "description", "subtitle")),
-            "vod_remarks": _s(_pick(info, "update_notice")) or (" · ".join(extra_bits)),
-            "vod_play_from": "优酷",
-            "vod_play_url": "#".join(play_urls),
-        }
-        return {"list": [vod]}
-
-    def searchContent(self, key, quick, pg="1"):
-        kw = _s(key)
-        u = ("https://search.youku.com/api/search?keyword=%s&page=%d"
-             % (_q(kw), int(pg or 1)))
-        st, txt = _http("GET", u, headers=self.hdr, timeout=15)
-        lst = []
-        seen = {}
-        if st and txt:
-            d = _jload(txt)
-            for c in (d.get("pageComponentList") or []):
-                cd = c.get("commonData") or {}
-                sid = _s(cd.get("showId") or cd.get("realShowId"))
-                if not sid:
-                    continue
-                # 标题在 titleDTO.displayName；无则退化到 displayName / title
-                title = ""
-                td = cd.get("titleDTO")
-                if isinstance(td, dict):
-                    title = _s(_pick(td, "displayName", "title", "name"))
-                if not title:
-                    title = _s(_pick(cd, "displayName", "title", "showName", "name"))
-                if not title:
-                    continue
-                # 去重（同一 showId 在多个组件里重复出现）
-                if sid in seen:
-                    continue
-                # 封面：commonData.sourceImg / posterDTO
-                pic = _s(_pick(cd, "sourceImg", "posterImg", "img", "thumbnail"))
-                if not pic:
-                    pd = cd.get("posterDTO")
-                    if isinstance(pd, dict):
-                        pic = _s(_pick(pd, "sourceImg", "img", "pic"))
-                seen[sid] = 1
-                lst.append({
-                    "vod_id": sid,
-                    "vod_name": title,
-                    "vod_pic": _img(pic),
-                    "vod_remarks": _s(_pick(cd, "feature", "stripeBottom")),
-                })
-        return {"list": lst, "page": int(pg or 1)}
-
-    # ---------------- 播放（4K 解析引擎） ----------------
-    # 解析接口失效特征（停运告别页 / 域名待售 / 跳转劫持页）
-    _DEAD_WORDS = ("\u540e\u4f1a\u65e0\u671f", "for sale", "domain is for sale",
-                   "\u57df\u540d\u51fa\u552e", "\u6c5f\u6e56\u8def\u8fdc",
-                   "urldance", "aipages.dev", "under construction", "coming soon",
-                   "\u5df2\u505c\u6b62", "\u505c\u6b62\u670d\u52a1")
-
-    def _parser_ok(self, parser):
-        """探测解析接口可用性并缓存（避免每次播放都试错）。
-        判定： HTTP 200 + 页面够长 + 不含失效特征词 + 有播放器骨架。"""
-        key = "p:" + parser
-        if key in self._probe:
-            return self._probe[key]
-        ok = False
-        try:
-            hd = {"User-Agent": self.parser_ua, "Referer": REF}
-            if self.cookie:
-                hd["Cookie"] = self.cookie
-            u = parser + _q("https://v.youku.com/v_show/id_XNTk0NjA0MzYw.html")
-            st, txt = _http("GET", u, headers=hd, timeout=6)
-            txt = txt or ""
-            low = txt.lower()
-            if st and len(txt) > 500:
-                ok = True
-                for w in self._DEAD_WORDS:
-                    if w.lower() in low:
-                        ok = False
-                        break
-                if ok:
-                    skel = ("player" in low or "m3u8" in low or
-                            "iframe" in low or "<video" in low or
-                            "id=\"a1\"" in low or "parse" in low or
-                            "dplayer" in low or "tcplayer" in low)
-                    if not skel:
-                        ok = False
-        except Exception:
-            ok = False
-        self._probe[key] = ok
-        _log("parser", parser, ok)
-        return ok
-
-    def _pick_parser(self, page_url):
-        """按可用性择优挑一个解析接口。用户显式指定的 force_parser 直接信任。"""
-        if not self.use_parser:
-            return ""
-        if self.force_parser:
-            return self.force_parser + _q(page_url)
-        for p in self.parsers:
-            if self._parser_ok(p):
-                return p + _q(page_url)
-        return ""
-
-    def playerContent(self, flag, id, vipFlags):
-        vid = _s(id or "")
-        # 已是直链，直接播
-        if re.search(r"\.(m3u8|mp4|flv|mkv|webm)(\?|$)", vid):
-            return {"parse": 0, "jx": 0, "url": vid,
-                    "header": {"User-Agent": UA_PC, "Referer": REF,
-                               "Origin": "https://www.youku.com"}}
-        # 拼优酷播放页
-        if vid.startswith("http"):
-            page_url = vid
-        else:
-            page_url = "https://v.youku.com/v_show/id_%s.html" % vid
-        # 解析通道（4K 优化：择优 + 移动端 UA + Cookie）
-        jx = self._pick_parser(page_url)
-        if jx:
-            hd = {"User-Agent": self.parser_ua, "Referer": REF}
-            if self.cookie:
-                hd["Cookie"] = self.cookie
-            return {"parse": 1, "jx": 1, "url": jx, "header": hd}
-        # 兜底：交给壳子解析播放页
-        return {"parse": 1, "jx": 1, "url": page_url,
-                "header": {"User-Agent": UA_PC, "Referer": REF}}
+    def localProxy(self, param):
+        return None
