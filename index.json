@@ -740,14 +740,6 @@
       "quickSearch": 0
     },
     {
-      "key": "腾讯2视频2",
-      "name": "腾讯视频.py",
-      "type": 3,
-      "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/腾讯视频.py",
-      "searchable": 1,
-      "quickSearch": 1
-    },
-    {
       "key": "无尽",
       "name": "无尽资源",
       "type": 1,
@@ -757,42 +749,21 @@
     }
 	],
 	"parses": [
-        {
+{
+    "name": "解析聚合",
+    "type": 1,
+    "url": "http://niubi.69mini.com/api/?key=431a04a7ba75479aeffd826ec41afff7&url="
+  },
+  {
             "name": "小白解析",
             "type": 1,
-            "url": "https://api.52xiaobai.cn/api/parse.php?token=da5f30f63cf6a397f87da88e028d6732&url=",
+            "url": "https://api.52xiaobai.cn/api/parse.php?token=741e095f8ae92626d78c42223d8d2601&url=",
             "ext": {
                 "header": {
                     "user-agent": "Mozilla/5.0 (Linux; Android 13; V2049A Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/116.0.0.0 Mobile Safari/537.36"
                 }
             }
         },
-        {
-            "name": "定制接口",
-            "type": "1",
-            "url": "http://121.40.174.45:666/Smdy/Baomihua?token=x4SKA8rn&url=",
-            "ext": {
-                "flag": [
-                    "qq",
-                    "腾讯",
-                    "qiyi",
-                    "iqiyi",
-                    "爱奇艺",
-                    "奇艺",
-                    "youku",
-                    "yk",
-                    "优酷",
-                    "mgtv",
-                    "imgo",
-                    "芒果"
-                ]
-            }
-        },
-        {
-    "name": "解析聚合",
-    "type": 1,
-    "url": "http://niubi.69mini.com/api/?key=431a04a7ba75479aeffd826ec41afff7&url="
-  },
   
     { "name": "niub解析", "type": 1, "url": "http://niubi.69mini.com/api/?key=78664e339bfb2844b81eeb6efc4fb089&url=" },
     { "name": "千易", "type": 1, "url": "http://8.134.205.252:39466/ceshi/qianyi.php?key=rkd&url=" },
@@ -1077,4 +1048,4 @@
             "logo": "https://epg.112114.xyz/logo/{name}.png"
         }
     ]
-}
+	}
