@@ -33,6 +33,10 @@
   · 分页稳定 21 条/页，多条件叠加筛选结果正确
   · 参数顺序对结果无影响（已实测 3 种顺序结果一致），本版仍按接口下发顺序拼接
 ────────────────────────────────────────────────────────────
+【修订 2026-11-12】已删除 PARSE_LIST 中 3 条失效的「历史可用接口」
+  （千易 / 分享者 / gimy），播放不再轮询死链，统一 jx:1 交壳解析。
+  数据接口复测正常：7 分类 / 首页 21 条 / 搜索 39 条 / 详情 141 集。
+────────────────────────────────────────────────────────────
 
 仅供学习交流，请勿用于商业用途。
 """
@@ -75,40 +79,26 @@ DETAIL_API = (API + '/trpc.universal_backend_service.page_server_rpc.PageServer/
 SEARCH_API = API + '/trpc.videosearch.mobile_search.MultiTerminalSearch/MbSearch?vplatform=2'
 
 # ---------------------------------------------------------------
-# 腾讯播放核心难点：腾讯视频播放必须带「cKey」签名（AES 加密动态令牌），
-# 该算法在 player.js 里被重度混淆（自定义 base64 字母表 + WASM 级混淆），
-# 且经常变动；纯 Python 爬虫无法稳定复刻，TVBox 的 Python 环境也未必带 Crypto。
-# 因此社区统一做法是「cKey 代理 / 解析接口」：把播放页丢给第三方，它算好 cKey
-# 后回传真实 m3u8/mp4 直链。
+# 播放：腾讯视频播放页需 cKey 签名（player.js 内 AES 动态令牌、重度混淆），
+# 纯 Python 无法稳定复刻。历史上内置过的「历史可用接口」（千易 / 分享者 /
+# gimy，以及 52xiaobai / niubi / qianyi / zxy 等公开免费解析）已全部失效，
+# 2026-11-12 复测仍为超时 / SSL 断连。
 #
-# ⚠ 实测结论（2026-10-26）：下列公开免费接口目前已全部失效 ——
-#   52xiaobai → 403 / niubi → 账户欠费 / qianyi → 解析失败 /
-#   zxy → 404 / gimy → 解析失败 / qq2.php 官方代理 → 超时。
-# 所以本脚本「浏览/搜索/详情」完全正常（你已看到数据），但「播放」在免费接口
-# 下无法出片——这不是脚本逻辑问题，是腾讯的 cKey 墙 + 免费代理全灭。
+# 本版【已删除全部历史可用接口】，播放不再轮询死链白等十几秒，
+# 统一把播放页以 jx:1 交给壳配置的解析处理。
+# 首页 / 分类 / 搜索 / 详情 / 选集完全不受影响，均由官方接口直出。
 #
-# ✅ 你要做的只有一件事：把【当前还活着】的 cKey 代理地址填到下面。
-#   格式：('线路名', '代理前缀?url=')，前缀 + 腾讯播放页URL 即返回直链。
-#   找不到可用免费代理时，最稳的办法是加一个「多线路聚合配置源」代替本蜘蛛
-#   看腾讯（见同目录说明）；或自托管 CSDN 那种 qq.php（需服务器+有效Cookie）。
+# 若你有自建的可用 cKey 代理，按 ('线路名', '前缀?url=') 追加到 PARSE_LIST：
+#   PARSE_LIST = [('我的代理', 'https://你的域名/qq.php?url=')]
+# 详情页会自动多出一条线路并优先走直链；留空则始终 jx:1。
 # ---------------------------------------------------------------
-# 每个解析接口一条线路：详情页「线路」处可直接指定用哪个解析播放
-PARSE_LIST = [
-    # 用户提供的两个解析（已实测失效，保留占位，请替换为可用地址）
- 
-    # 以下为历史可用接口（当前已失效，留作格式参考 / 替换入口）
-    ('千易', 'http://8.134.205.252:39466/ceshi/qianyi.php?key=rkd&url='),
-    ('分享者', 'http://zxy-th1.jsszks.dpdns.org:8090/?url='),
-    ('gimy', 'https://player.gimy.bot/u/parse.php?url='),
-    # 👉 在此追加你找到的可用 cKey 代理，例如：
-    # ('我的代理', 'https://你的代理域名/qq.php?url='),
-]
-# 「自动」线路 = 依次尝试上面全部
+PARSE_LIST = []
+# 「自动」线路：默认唯一线路（PARSE_LIST 为空时不发起任何第三方请求）
 PARSE_LINES = [('自动', '')] + PARSE_LIST
 _PARSE_MAP = dict(PARSE_LIST)
 PARSE_APIS = [u for _, u in PARSE_LIST]
 
-# 直链缓存时长（秒）。token 会过期，故设很短
+# 直链缓存时长（秒）：仅自建代理时生效
 _PARSE_TTL = 300
 
 # 全部分类（腾讯视频频道 ID）
@@ -809,27 +799,25 @@ class Spider(_BaseSpider):
         else:
             page_url = '%s/x/cover/%s.html' % (HOST, cid)
 
-        # ① 按所选线路解析：具体线路名只走该接口；「自动」依次尝试全部
-        direct = _parse_direct(page_url, only=flag if flag in _PARSE_MAP else '')
-        if direct:
-            return {
-                'parse': 0,
-                'playUrl': direct,
-                'url': direct,
-                'header': header,
-            }
+        # ① 仅当自建了可用代理时才走直链解析；默认不发起任何第三方请求
+        if PARSE_APIS:
+            direct = _parse_direct(page_url, only=flag if flag in _PARSE_MAP else '')
+            if direct:
+                return {
+                    'parse': 0,
+                    'playUrl': direct,
+                    'url': direct,
+                    'header': header,
+                }
 
-        # ② 所有解析接口都失效时的兜底：交回框架（jx=1）。
-        #   注意：腾讯播放页本身不是媒体地址，框架也很难直接嗅探出片——
-        #   所以「播放失败」的根因是上面没有可用的 cKey 代理，而不是这里。
-        #   请务必在 PARSE_LIST 里填一个当前可用的 cKey 代理地址。
+        # ② 统一交回框架（jx=1）：腾讯播放页本身不是媒体地址，需壳侧解析。
+        #   历史可用接口已全部删除，不再逐个轮询死链拖慢出片。
         return {
             'parse': 1,
             'playUrl': '',
             'url': page_url,
             'jx': 1,
             'header': header,
-            'danmaku': 'http://127.0.0.1:9978/proxy?do=danmu&site=js&url=' + page_url,
         }
 
 
