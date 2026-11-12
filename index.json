@@ -7,7 +7,7 @@
         
         {
             "key": "配置中心",
-            "name": "配置中心 | 官网：easy321.top/jk",
+            "name": "配置中心 ",
             "type": 3,
             "api": "csp_Config",
             "searchable": 0,
@@ -140,7 +140,7 @@
   "key": "优酷",
   "name": "优酷视频",
   "type": 3,
-  "api": "./py2/优酷.py",
+  "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/优酷.py",
   "searchable": 1,
   "quickSearch": 1,
   "filterable": 1 
@@ -149,7 +149,7 @@
   "key": "爱奇艺",
   "name": "爱奇艺",
   "type": 3,
-  "api": "./py2/爱奇艺.py",
+  "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/爱奇艺.py",
   "searchable": 1,
   "quickSearch": 1,
   "filterable": 1 
@@ -158,7 +158,7 @@
       "key": "芒果TV",
       "name": "芒果.py",
       "type": 3,
-      "api": "./py2/芒果TV.py",
+      "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/芒果TV.py",
       "searchable": 1,
       "quickSearch": 1,
       "filterable":1
