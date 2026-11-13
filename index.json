@@ -158,7 +158,7 @@
       "key": "芒果TV",
       "name": "芒果.py",
       "type": 3,
-      "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/芒果TV.py",
+      "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/芒果.py",
       "searchable": 1,
       "quickSearch": 1,
       "filterable":1
@@ -168,6 +168,15 @@
       "name": "B站.py",
       "type": 3,
       "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/B站.py",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable":1
+    },
+		{
+      "key": "山楂",
+      "name": "山楂.py",
+      "type": 3,
+      "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/山楂.py",
       "searchable": 1,
       "quickSearch": 1,
       "filterable":1
@@ -810,9 +819,7 @@
             }
         },
   
-    { "name": "niub解析", "type": 1, "url": "http://niubi.69mini.com/api/?key=78664e339bfb2844b81eeb6efc4fb089&url=" },
-    { "name": "千易", "type": 1, "url": "http://8.134.205.252:39466/ceshi/qianyi.php?key=rkd&url=" },
-    { "name": "分享者", "type": 1, "url": "http://zxy-th1.jsszks.dpdns.org:8090/?url=" },
+    
     { "name": "gimy", "type": 1, "url": "https://player.gimy.bot/u/parse.php?url=" },
     {
     "name": "牛牛解析1",
