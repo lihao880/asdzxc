@@ -2,22 +2,22 @@
 	"wallpaper": "https://tuapi.eees.cc/api.php?category=fengjing&type=302",
 	"homepage": "https://github.com/hjdhnx/hipy-server",
 
-	"spider": "https://gitee.com/easy999/test1/raw/main/easy10.20.png;md5;89e4b4da711039208b57fd5f5d576817",
+	"spider": "https://s1.tuoguanyun.cn/autoupload/f/eix3x/20261114/tzVs/0X0/easy11.14.png;md5;0fde605daa324202bfda23e5cfef0a65",
 	"sites": [
         
         {
-            "key": "配置中心",
-            "name": "配置中心 ",
-            "type": 3,
-            "api": "csp_Config",
-            "searchable": 0,
-            "changeable": 0,
-            "indexs": 0,
-            "style": {
-                "type": "rect",
-                "ratio": 1.618
-            }
-        },
+      "key": "配置中心",
+      "name": "配置中心",
+      "type": 3,
+      "api": "csp_Config",
+      "searchable": 0,
+      "changeable": 0,
+      "indexs": 0,
+      "style": {
+        "type": "rect",
+        "ratio": 1.618
+      }
+    },
     {
             "key": "superframe",
             "name": "超帧设置",
