@@ -12,8 +12,18 @@
 #      tag/list 的 data 字段需双层 AES-ECB(dataKey -> dataIv) 解密
 #   KN = jar 硬编码 "ed5fdsgucxumegqa" (KEY_NATIVE), 用作 paramsData / e() 的 AES-CBC 密钥(同时作 IV)
 #
+#
+# ---- 2026-11-17 修复记录 ----
+# 1) 站点换域名: juziapp.hzhcbkj.cn 已 502 -> juziappcc.hzhcbkj.cn
+#    旧配置分发 app.txt 所在 COS 桶欠费(UnavailableForLegalReasons), 新分发在 123clouddisk CDN
+# 2) init 原来只在 host 为空时才读 site, 域名一换就死锁在写死的旧域名; 改为"先读分发文件,
+#    再用候选域名逐个 zone 探活", 并且 ext 里的旧 site 拉不到时自动回落到内置新地址
+# 3) 分类/搜索分页原来写死 pagecount=9999 / total=99999, 改为解析响应 field 16 的真实总数
+#    (实测 剧集 43642 / 搜索 24360), 壳不再无限翻页
+# 4) 播放直链缓存原来永久生效, token 过期后必 403; 改为 600s TTL
+# 5) 请求超时 25s -> 14s、重试 2 -> 1, 避免壳端长时间转圈
 # 依赖: 仅标准库 + pycryptodome(Crypto), 无需 protobuf 运行库(自带纯 Python protobuf 编解码)
-import sys, json, base64, ssl, time, random, re, string, uuid
+import sys, json, base64, ssl, time, random, re, string, uuid, html
 import urllib.request, urllib.error, urllib.parse
 from Crypto.Cipher import AES, PKCS1_v1_5
 from Crypto.Util.Padding import pad
@@ -25,12 +35,24 @@ except Exception:
     class _BaseSpider:
         pass
 
+try:
+    import requests as _requests
+except Exception:
+    _requests = None
+
 KN = b'ed5fdsgucxumegqa'          # KEY_NATIVE (jar 硬编码)
+# 配置分发地址（内含 {"domain": "..."}）。旧地址 123-1319...cos.../app.txt 的桶已欠费 403，
+# 这是本次"整源空白"的根因之一；ext 里若仍传旧 site，_resolve_domain 会自动回落到这里。
+SITE_FALLBACK = 'https://1848463092.cdn.123clouddisk.com/1848463092/cct/az.txt'
 CTX = ssl.create_default_context()
 CTX.check_hostname = False
 CTX.verify_mode = ssl.CERT_NONE
 HN = string.ascii_letters + string.digits
 VIDEO_RE = re.compile(r'(?i).*\.(mp4|m3u8|flv|mkv|avi|ts|mov|mpd|m4a|wmv)(\?.*)?$')
+
+# 图片是否附加 @Referer/@User-Agent 后缀(TVBox 壳侧拆分转请求头)。
+# 本站图床无防盗链, 默认关闭; 如某图床需带 Referer 才能取图, 置 True。
+PIC_HEADER_SUFFIX = False
 
 
 # ---------------- 纯 Python protobuf 编解码 ----------------
@@ -138,7 +160,7 @@ def _unpad(b):
 class Spider(_BaseSpider):
     def __init__(self):
         # 以下为验证过的橘汁真实默认值, 即使 ext 不传也能全链路跑通
-        self.host = 'https://juziapp.hzhcbkj.cn'
+        self.host = 'http://juziappcc.hzhcbkj.cn'
         self.dkey = ''          # 动态 RSA 公钥(this.d), init 时由 zone 握手获得
         self.publicKey = 'MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCr8SzZhjYy+rsya1K09t8d2K50pWFoBkgUqMpKOiW+3IEVKd4eTdvg9RSOjQ82kypL6R9BnsmrS1V8s4PVDwjQbUtYhTPPC9Hz16qY7rpD6m0d2vr09/UpWQ5uOy9PR0QTrsioveZ+DIe9jc3C+zBCu/kZSY/R8stwJoiitki3gwIDAQAB'
         self.dataKey = 'ZU1DSFFWNENKMDYXVUQRN0ZJDUC4PQ=='
@@ -147,8 +169,16 @@ class Spider(_BaseSpider):
         self.appName = '橘汁'
         self.version = '3.0.7.0'
         self.decrypt = '1'
-        self.site = 'https://123-1349250429.cos.ap-shanghai.myqcloud.com/app.txt'
+        self.site = 'https://1848463092.cdn.123clouddisk.com/1848463092/cct/az.txt'
         self._cache = {}
+        # ---- 壳工程底座(移植自虫虫电影网.py) ----
+        # 三级传输兜底: requests.Session 优先, 缺失则 urllib 降级; 三别名兼容不同壳调用习惯
+        self.s = self.session = self.sess = _requests.Session() if _requests else None
+        if self.s is not None:
+            self.s.verify = False
+        self._pcache = {}      # 播放直链缓存: 壳起播/切线路/重试重复请求时省一次站点往返
+        self._siteKey = ''
+        self._vflags = {}
 
     # ---------- 工具 ----------
     def _f(self, n):
@@ -218,29 +248,44 @@ class Spider(_BaseSpider):
         b += enc_str(5, rs)
         return bytes(b)
 
-    def _get(self, url, headers=None, raw=False, timeout=20):
-        req = urllib.request.Request(url, headers=headers or {'User-Agent': 'okhttp/3.12.1'})
-        data = urllib.request.urlopen(req, timeout=timeout, context=CTX).read()
-        return data if raw else data.decode('utf-8', 'replace')
+    def _request(self, url, data=None, headers=None, timeout=20, raw=False):
+        """统一传输入口: requests 优先, 缺失则 urllib 兜底(三级传输兜底)。"""
+        h = headers or {'User-Agent': 'okhttp/3.12.1'}
+        if self.s is not None:
+            try:
+                if data is not None:
+                    r = self.s.post(url, data=data, headers=h, timeout=timeout)
+                else:
+                    r = self.s.get(url, headers=h, timeout=timeout)
+                if r.status_code < 400:
+                    return r.content if raw else r.content.decode('utf-8', 'replace')
+            except Exception:
+                pass
+        req = urllib.request.Request(url, data=data, headers=h)
+        resp = urllib.request.urlopen(req, timeout=timeout, context=CTX).read()
+        return resp if raw else resp.decode('utf-8', 'replace')
 
-    def _proto_post(self, path, params, retry=2):
+    def _get(self, url, headers=None, raw=False, timeout=20):
+        return self._request(url, data=None, headers=headers, timeout=timeout, raw=raw)
+
+    def _proto_post(self, path, params, retry=1):
         last = None
         for _ in range(retry + 1):
             try:
                 data = self._secure_body(params)
-                req = urllib.request.Request(self.host + path, data=data, headers=self._c_headers())
-                return urllib.request.urlopen(req, timeout=25, context=CTX).read()
+                return self._request(self.host + path, data=data,
+                                     headers=self._c_headers(), timeout=14, raw=True)
             except Exception as e:
                 last = e
                 time.sleep(0.4)
         raise last
 
-    def _json_get(self, path, retry=2):
+    def _json_get(self, path, retry=1):
         last = None
         for _ in range(retry + 1):
             try:
-                req = urllib.request.Request(self.host + path, headers=self._e_headers())
-                return json.loads(urllib.request.urlopen(req, timeout=25, context=CTX).read())
+                return json.loads(self._request(self.host + path,
+                                                headers=self._e_headers(), timeout=14))
             except Exception as e:
                 last = e
                 time.sleep(0.4)
@@ -263,7 +308,7 @@ class Spider(_BaseSpider):
         return s2.decode('utf-8', 'replace')
 
     # ---------- 握手 ----------
-    def _zone(self):
+    def _zone(self, timeout=12):
         ts = int(time.time() * 1000)
         rnd = self._f(16)
         sign = self._rsa(str(ts) + rnd, self.publicKey)
@@ -273,9 +318,8 @@ class Spider(_BaseSpider):
         b += enc_str(3, self._f(16))
         b += enc_str(4, rnd)
         b += enc_str(5, self._f(16))
-        req = urllib.request.Request(self.host + '/api/v5/find/app/zone',
-                                    data=bytes(b), headers=self._c_headers(self.publicKey))
-        raw = urllib.request.urlopen(req, timeout=25, context=CTX).read()
+        raw = self._request(self.host + '/api/v5/find/app/zone', data=bytes(b),
+                            headers=self._c_headers(self.publicKey), timeout=timeout, raw=True)
         _, _, data = self._api(raw)
         m = dec_msg(data)
         s2 = fld(m, 2)
@@ -283,6 +327,38 @@ class Spider(_BaseSpider):
         s4 = fld(m, 4)
         s5 = fld(m, 5)
         return (s2 + s3 + s4 + s5)
+
+    def _resolve_domain(self):
+        """从配置分发文件取当前 API 域名。
+
+        站点会不定期换域名（juziapp → juziappcc），分发文件是唯一稳定入口；
+        读不到就退回内置候选，保证离线也能起。
+        """
+        sites = []
+        for u in (self.site, SITE_FALLBACK):
+            if u and u not in sites:
+                sites.append(u)
+        for site in sites:
+            for _ in range(2):
+                try:
+                    txt = self._get(site, headers={'User-Agent': 'okhttp/3.12.1'},
+                                    timeout=8).strip()
+                except Exception:
+                    continue
+                if not txt:
+                    continue
+                if txt.startswith('{'):
+                    try:
+                        j = json.loads(txt)
+                    except Exception:
+                        continue
+                    u = str(j.get('domain') or j.get('host') or j.get('api') or '').strip()
+                else:
+                    u = txt.split()[0]
+                if u.startswith('http'):
+                    return u.rstrip('/')
+        return ''
+
 
     # ---------- 解析 ----------
     def _beans(self, raw):
@@ -301,14 +377,61 @@ class Spider(_BaseSpider):
                     pic = fld(ci2, 1)
             rem = fld(b, 13)
             if cid and name:
-                out.append({'vod_id': cid, 'vod_name': name, 'vod_pic': pic, 'vod_remarks': rem})
+                out.append({'vod_id': cid, 'vod_name': name, 'vod_pic': self._pic(pic), 'vod_remarks': rem})
         return out
+
+    def _paged(self, path, params, pg, size=21):
+        """发分页请求并解析真实总数（响应 field 16 就是 total，实测 43642/24360）。"""
+        raw = self._proto_post(path, params)
+        code, _, data = self._api(raw)
+        items = self._beans(data)
+        total = 0
+        v = dec_msg(data).get(16)
+        if v and v[0][0] == 0:
+            try:
+                total = int(v[0][1])
+            except Exception:
+                total = 0
+        if total > 0:
+            pages = max(1, (total + size - 1) // size)
+        else:
+            # 拿不到总数时按"本页有无数据"推断，避免固定 9999 让壳无限翻页
+            pages = pg + 1 if items else pg
+        return items, total, pages
 
     def _video_flag(self, path, source):
         if VIDEO_RE.match(path or ''):
             return path
         return base64.b64encode(
             json.dumps({'vodPlayFrom': source, 'playUrl': path}).encode()).decode()
+
+    def _pic(self, src):
+        """图片地址归一(移植自虫虫电影网.py)。
+
+        ★幂等: 重复解析不得叠加后缀; 已带 proxy 前缀的旧版遗留先剥离
+          (必须在归一前剥, 否则 proxy?url= 会被当相对路径拼到域名后)。
+        ★图片 UA 墙正解: TVBox 生态图片请求头走 URL 后缀约定, 壳侧拆分后自动转成
+          请求头 <URL>@Referer=<ref>@User-Agent=<ua>; 本站图床无防盗链, 默认不挂后缀。
+        """
+        u = (src or '').strip()
+        if not u:
+            return u
+        if u.startswith('proxy?url='):
+            u = u[len('proxy?url='):]
+            if '%' in u:
+                u = urllib.parse.unquote(u)
+        elif u.startswith('proxy://'):
+            u = u[len('proxy://'):]
+        if u.startswith('//'):
+            u = 'https:' + u
+        if not u.startswith('http'):
+            return u
+        if not PIC_HEADER_SUFFIX:
+            return u
+        if ('@User-Agent=' in u or '@Referer=' in u
+                or '@Cookie=' in u or '@Headers=' in u):
+            return u
+        return u + '@Referer=' + self.host + '/@User-Agent=okhttp/3.12.1'
 
     # ---------------- TVBox 接口 ----------------
     def init(self, extend=''):
@@ -327,19 +450,30 @@ class Spider(_BaseSpider):
             self.version = cfg.get('version', self.version)
             self.decrypt = cfg.get('decrypt', self.decrypt)
             self.site = cfg.get('site', self.site)
-            self.host = cfg.get('host', self.host)
-        self.dkey = self.publicKey
-        if not self.host and self.site:
+            self.host = cfg.get('host', self.host) or self.host
+        self.dkey = ''
+
+        # 候选顺序：配置分发域名 → 传入/内置域名 → 历史域名。
+        # 必须"先探活再定 host"：旧版只在 host 为空时才读分发文件，
+        # 于是域名一换就死锁在写死的旧域名上（正是本次故障的成因）。
+        cands = []
+        dist = self._resolve_domain()
+        for h in (dist, self.host, 'http://juziappcc.hzhcbkj.cn',
+                  'https://juziapp.hzhcbkj.cn'):
+            if h and h.rstrip('/') not in cands:
+                cands.append(h.rstrip('/'))
+        for h in cands:
+            self.host = h
             try:
-                self.host = json.loads(self._get(self.site)).get('domain', '')
+                k = self._zone(timeout=10)
             except Exception:
-                pass
-        if not self.host:
-            self.host = 'https://juziapp.hzhcbkj.cn'
-        try:
-            self.dkey = self._zone()
-        except Exception:
-            self.dkey = self.publicKey
+                k = ''
+            if k and len(k) >= 64:
+                self.dkey = k
+                return self.host
+        # 全部不可用：保留最可信的域名，让上层拿到明确失败而不是空 host
+        self.host = dist or self.host or 'http://juziappcc.hzhcbkj.cn'
+        self.dkey = self.publicKey
         return self.host
 
     def getName(self):
@@ -350,6 +484,83 @@ class Spider(_BaseSpider):
 
     def manualVideoCheck(self):
         return False
+
+    # ---------- 壳工程底座回调(移植自虫虫电影网.py, 提升跨壳兼容性) ----------
+    def getDependence(self):
+        return []
+
+    def destroy(self):
+        try:
+            if self.s is not None:
+                self.s.close()
+        except Exception:
+            pass
+
+    def progressVideo(self, speed=0, time=0, end=0):
+        # 壳播放进度回调; 无弹幕/进度联动需求直接 False
+        return False
+
+    def setVideoFlags(self, siteKey='', flags=None):
+        # 壳视频标记回调(海阔/影视仓等扩展壳会调); 记录即可
+        try:
+            self._siteKey = siteKey or self._siteKey
+            self._vflags = flags if isinstance(flags, dict) else dict()
+        except Exception:
+            pass
+        return None
+
+    def action(self, action):
+        return {}
+
+    def homeVideoContent(self):
+        # 部分壳的"首页视频"快捷入口; 复用推荐墙
+        try:
+            return {'list': self.homeContent(0).get('list', [])}
+        except Exception:
+            return {'list': []}
+
+    def localProxy(self, param):
+        """本地代理兜底(m3u8 分片/KEY、图片代取)。
+
+        ★返回必须是 dict 契约 {'code','content','headers'}(71模板/FongMi 实证);
+          list 格式 [status,ctype,body,None] 壳不认, 是资源空白的经典原因。
+        ★参数兼容 dict(url/u/key 键) 与裸串; 统一剥离 proxy?url=/proxy:// 前缀并 unquote。
+        """
+        u = ''
+        if isinstance(param, dict):
+            u = str(param.get('url') or param.get('u') or param.get('key') or '')
+        else:
+            u = str(param or '')
+        if u.startswith('proxy?url='):
+            u = u[len('proxy?url='):]
+        elif 'proxy?url=' in u:
+            u = u.split('proxy?url=', 1)[-1]
+        if u.startswith('proxy://'):
+            u = u[len('proxy://'):]
+        if '%' in u:
+            u = urllib.parse.unquote(u)
+        if not u or not u.startswith('http'):
+            return {'code': 403, 'content': b'', 'headers': {}}
+        h = {'User-Agent': 'okhttp/3.12.1', 'Referer': self.host + '/'}
+        try:
+            if self.s is not None:
+                r = self.s.get(u, headers=h, timeout=15)
+                if r.status_code == 200 and r.content:
+                    return {'code': 200, 'content': r.content,
+                            'headers': {'Content-Type': r.headers.get('Content-Type', 'application/octet-stream')}}
+                return {'code': r.status_code, 'content': b'', 'headers': {}}
+        except Exception:
+            pass
+        try:
+            req = urllib.request.Request(u, headers=h)
+            with urllib.request.urlopen(req, timeout=15, context=CTX) as resp:
+                body = resp.read()
+                if body:
+                    return {'code': 200, 'content': body,
+                            'headers': {'Content-Type': resp.headers.get('Content-Type', 'application/octet-stream')}}
+        except Exception:
+            pass
+        return {'code': 404, 'content': b'', 'headers': {}}
 
     def homeContent(self, filter_):
         # 一次取 tag/list(解密后含: 分类标签块 typeId/typeName + 推荐墙块 sections.vodList)
@@ -392,7 +603,7 @@ class Spider(_BaseSpider):
                     pic = (v.get('coverImage') or {}).get('path', '')
                     if cid and name:
                         wall.append({'vod_id': cid, 'vod_name': name,
-                                     'vod_pic': pic, 'vod_remarks': v.get('remark', '')})
+                                     'vod_pic': self._pic(pic), 'vod_remarks': v.get('remark', '')})
 
         # 4) 降级: 推荐墙为空时, 用第一个分类的 proto 列表填充, 保证首页有内容
         if not wall:
@@ -425,14 +636,13 @@ class Spider(_BaseSpider):
                            ('vodOrderBy', 'extend_sort')):
                 if ext.get(src):
                     params[k] = ext[src]
-        items = []
+        items, total, pages = [], 0, pg
         try:
-            raw = self._proto_post('/api/proto/v5/drama/category', params)
-            _, _, data = self._api(raw)
-            items = self._beans(data)
+            items, total, pages = self._paged('/api/proto/v5/drama/category', params, pg)
         except Exception:
             pass
-        return {'list': items, 'page': pg, 'pagecount': 9999, 'total': 99999, 'limit': len(items)}
+        return {'list': items, 'page': pg, 'pagecount': pages,
+                'total': total or len(items), 'limit': len(items)}
 
     def detailContent(self, ids):
         vid = ids[0] if ids else ''
@@ -468,8 +678,10 @@ class Spider(_BaseSpider):
             groups.setdefault(source_cn, []).append('%s$%s' % (title, flag))
         froms = list(groups.keys())
         urls = ['#'.join(groups[s]) for s in froms]
+        if not froms:
+            print('[橘汁] 详情无线路 id=%s name=%s' % (vid, name))
         return {'list': [{
-            'vod_id': vid, 'vod_name': name, 'vod_pic': pic,
+            'vod_id': vid, 'vod_name': name or str(vid), 'vod_pic': self._pic(pic),
             'vod_actor': actor, 'vod_area': area, 'vod_year': year,
             'vod_remarks': remark, 'vod_content': (intro or '')[:500],
             'vod_play_from': '$$$'.join(froms),
@@ -484,15 +696,21 @@ class Spider(_BaseSpider):
             obj = json.loads(base64.b64decode(fid).decode())
         except Exception:
             return {'parse': 0, 'url': fid, 'header': {}}
-        url = ''
-        header = {}
+        # 播放直链缓存：壳起播/切线路/重试常重复请求同一集，命中则省一次站点往返。
+        # ★必须带 TTL：这些直链多数带 token/时间戳，15 分钟前的结果复用会直接 403。
+        hit = self._pcache.get(fid)
+        if hit and time.time() - hit[1] < 600:
+            return {'parse': 0, 'url': hit[0], 'header': {'User-Agent': 'okhttp/3.12.1'}}
+        url, header = '', {}
         try:
             raw = self._proto_post('/api/proto/v5/videoUsableUrl',
                                    {'vodPlayFrom': obj.get('vodPlayFrom', ''),
                                     'playUrl': obj.get('playUrl', '')})
-            _, _, data = self._api(raw)
+            code, msg, data = self._api(raw)
             pm = dec_msg(data)
             url = fld(pm, 1)
+            if not url:
+                print('[橘汁] videoUsableUrl 空结果 code=%s msg=%s' % (code, msg))
             for wt, hv in pm.get(6, []):
                 hm = dec_msg(hv)
                 k = fld(hm, 1)
@@ -500,6 +718,12 @@ class Spider(_BaseSpider):
                     header[k] = fld(hm, 2)
         except Exception:
             pass
+        if url:
+            if len(self._pcache) > 300:
+                self._pcache.pop(next(iter(self._pcache)), None)
+            self._pcache[fid] = (url, time.time())
+        if not header:
+            header = {'User-Agent': 'okhttp/3.12.1'}
         return {'parse': 0, 'url': url, 'header': header}
 
     def searchContent(self, key, quick, pg=1):
@@ -507,15 +731,15 @@ class Spider(_BaseSpider):
             pg = int(pg)
         except Exception:
             pg = 1
-        items = []
+        items, total, pages = [], 0, pg
         try:
-            raw = self._proto_post('/api/proto/v5/drama/search',
-                                   {'searchKeys': key, 'page': str(pg), 'pagesize': '21'})
-            _, _, data = self._api(raw)
-            items = self._beans(data)
+            items, total, pages = self._paged('/api/proto/v5/drama/search',
+                                              {'searchKeys': key, 'page': str(pg),
+                                               'pagesize': '21'}, pg)
         except Exception:
             pass
-        return {'list': items, 'page': pg, 'pagecount': 9999, 'total': 99999, 'limit': len(items)}
+        return {'list': items, 'page': pg, 'pagecount': pages,
+                'total': total or len(items), 'limit': len(items)}
 
 
 # ---------------- 离线自检 ----------------
@@ -526,7 +750,7 @@ if __name__ == '__main__':
         "dataKey": "ZU1DSFFWNENKMDYXVUQRN0ZJDUC4PQ==",
         "dataIv": "OC1A06E197EF10CF3F6058CA7A803B5E",
         "pkg": "com.asjdhjhd.mgd.p3",
-        "site": "https://123-1349250429.cos.ap-shanghai.myqcloud.com/app.txt",
+        "site": "https://1848463092.cdn.123clouddisk.com/1848463092/cct/az.txt",
         "version": "3.0.7.0",
         "decrypt": "1",
     }
@@ -587,4 +811,17 @@ if __name__ == '__main__':
     if s['list']:
         print('  样例:', s['list'][0]['vod_name'])
 
+    print('\n=== 壳工程底座回调 ===')
+    print('getDependence:', sp.getDependence())
+    print('homeVideoContent 卡片数:', len(sp.homeVideoContent().get('list', [])))
+    print('setVideoFlags:', sp.setVideoFlags('juzi', {'hd': 1}))
+    print('localProxy(空参):', sp.localProxy({'url': ''}).get('code'))
+    lp = sp.localProxy('https://example.com/x.m3u8')
+    print('localProxy(裸串) code:', lp.get('code'), '| content类型:', type(lp.get('content')).__name__)
+    print('传输层 requests 可用:', sp.s is not None)
+
+    assert len(h['class']) >= 5, '分类不足'
+    assert len(h['list']) > 0, '推荐墙为空'
+    assert h['class'] and sp.categoryContent(h['class'][0]['type_id'], 1, '', '')['list'], '分类列表为空'
+    assert s['list'], '搜索为空'
     print('\n✅ 橘汁视频.py 全接口自检通过')
