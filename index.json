@@ -70,6 +70,15 @@
       "quickSearch": 1,
       "filterable": 1
     },
+	 {
+      "key": "影探聚合",
+      "name": "影探聚合.py",
+      "type": 3,
+      "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/影探聚合.py",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 1
+    },
   {
    "key": "玩偶",
    "name": "玩偶 | 4K",
