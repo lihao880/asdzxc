@@ -52,6 +52,24 @@
    },
    "timeout": 60
   },
+	 {
+      "key": "橘汁视频",
+      "name": "橘汁视频",
+      "type": 3,
+      "api": https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/橘汁视频.py",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 1
+    },
+	 {
+      "key": "新云帧享.py",
+      "name": "新云帧享.py",
+      "type": 3,
+      "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/新云帧享.py",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 1
+    },
   {
    "key": "玩偶",
    "name": "玩偶 | 4K",
