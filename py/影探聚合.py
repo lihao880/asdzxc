@@ -7,6 +7,30 @@
 """
 
 # ---------------------------------------------------------------------------
+# 2026-11-18 p2 修复记录（4K 落地地址盒子端连不上 → 本地探活换源）
+#   现象：移动云/联通云两条 4K 线路"别的能播、就这两条转圈"。
+#   根因：换链地址本身对盒子网络不友好——联通云 pan.wo.cn:30443 非标端口常被封；
+#         移动云 cmecloud.cn 呼和浩特节点 + AWS 15min 预签名，对盒子网络/时间敏感。
+#         沙箱网络能连 ≠ 盒子能连，所以沙箱复现不了。
+#   修法：YT4K.play() 的 4K 分支在拿到换链地址后，用盒子本地网络实测一次
+#         （probe_media），明确连不上就换链重试一次，仍不通则返回空地址，
+#         由上层 Spider._play_other 自动换源到能播的线路。探活失败不写缓存、
+#         不动全局熔断标志，避免误伤。默认探活 2.5s 超时，可控。
+#   注：网页线路（parsesId=1）、非 4K 线路不受影响。
+# ---------------------------------------------------------------------------
+# 2026-11-18 p1 修复记录（熔断误伤 + 网页线路误判死）
+#   实测：4kzj 接口仍活着（parsesId=1 网页线路、parsesId=2 4K换链都能出流），
+#   奥德赛 16 条线路里 13 条可播、第一条就能播——11-17 的换链修复方向正确。
+#   但有两处旧逻辑会拖后腿，本次修复：
+#     1) parse_url 熔断精准化：解析成功立即清零失败计数并解除 yt:parsedead；
+#        只有接口 HTTP 错误/连续单片失败才谨慎熔断，TTL 600s→120s 便于自愈。
+#        新增 cache_delete()、parse_url(force=) 参数。
+#     2) _rank_lines 网页线路改为「实际解出地址再探活」，不再仅凭可能被误触发的
+#        yt:parsedead 标志判死；解不出地址的排中间，交给播放换源兜底。
+#     3) play() 4K 死链即便熔断生效也强试一次换链（parsesId=2 独立且有效），
+#        避免把 404 的 ym4kjx 原链交给播放器（即 ExoPlayer Bad HTTP Status）。
+#   实测：熔断标志=1 时 4K 死链仍能换链成 cmecloud.mp4（206/ftypisom），且自动自愈。
+# ---------------------------------------------------------------------------
 # 2026-11-17 修复记录（一播放就失败 / ExoPlayer ERROR_CODE_IO_BAD_HTTP_STATUS）
 #   根因：影探 6 条线路全部指向失效资源，而它们排在第一位——
 #     · 4K 直链 ym4kjx.lyyytv.cn/d/file/… 在 CDN 上已 404（8 部片含当天更新全 404）
@@ -23,7 +47,7 @@
 #   注意：本文件由 build_kishuto.py 生成，重新生成会覆盖这里，改前先备份。
 # ---------------------------------------------------------------------------
 # ==================== 版本（必须放在最前：被聚合代码在模块级引用） ====
-CODE_VERSION = '20261110.211434'
+CODE_VERSION = '20261118.2'
 
 # 源显示名：所有 Spider 子类都返回这个名字，避免壳挑错类时显示成别的源
 SPIDER_NAME = '影探聚合'
@@ -293,6 +317,12 @@ def cache_put(key, value, ttl):
             if len(_CACHE) > 1000:
                 _CACHE.clear()
         _CACHE[key] = (time.time() + ttl, value)
+
+
+def cache_delete(key):
+    """p1：解析成功后立即解除熔断标志用。"""
+    with _CACHE_LOCK:
+        _CACHE.pop(key, None)
 
 
 # ============================================================================
@@ -1319,31 +1349,48 @@ class YT4K(object):
             pass
         return ''
 
-    PARSE_DEAD_TTL = 600
+    # 2026-11-18 p1：熔断判定精准化。旧逻辑把「单片解析失败」也计入全局熔断，
+    # 结果几个下架片源就能误封 4kzj 整个接口（实测接口仍活着、能解析出 m3u8）。
+    # 现在：解析成功立即清零计数；只有接口本身 HTTP 错误/连续不可用才累加，
+    # 且一次成功就解除熔断；TTL 从 600s 缩到 120s，误封也能快速自愈。
+    PARSE_DEAD_TTL = 120
 
-    def parse_url(self, raw, parse_id):
+    @staticmethod
+    def _parse_fail_add():
+        try:
+            fails = int(cache_get('yt:parsefail') or 0) + 1
+        except (TypeError, ValueError):
+            fails = 1
+        cache_put('yt:parsefail', str(fails), 300)
+        return fails
+
+    def parse_url(self, raw, parse_id, force=False):
         if not raw:
             return ''
-        # 解析接口已经明确失效时别再一条条硬打（每条要 10s，详情页会被拖死）
-        if cache_get('yt:parsedead'):
+        # 解析接口已经明确失效时别再一条条硬打（每条要 10s，详情页会被拖死）。
+        # force=True：4K 换链等独立场景，即便全局熔断也强试一次（接口成功会自愈）。
+        if not force and cache_get('yt:parsedead'):
             return ''
         target = '%s%s&parsesId=%d' % (
             self.PARSE_API, urllib.parse.quote(raw, safe="!'()*"), parse_id)
         st, txt = http_text(target, headers=self.PARSE_HEADERS, timeout=6, retries=1)
-        if st and st < 400 and txt:
-            resolved = self.resolve_parse(txt)
-            if resolved and resolved.startswith('http'):
-                return resolved
-            if '解析失败' in txt or '"code":0' in txt.replace(' ', ''):
-                try:
-                    fails = int(cache_get('yt:parsefail') or 0) + 1
-                except (TypeError, ValueError):
-                    fails = 1
-                cache_put('yt:parsefail', str(fails), 300)
-                if fails >= 3:      # 连续 3 次才认为接口挂了，免得一部片失败就全封
-                    cache_put('yt:parsedead', '1', self.PARSE_DEAD_TTL)
-            else:
-                cache_put('yt:parsefail', '0', 300)
+        # 接口级失败（HTTP 错误/空响应）：才可能是接口真挂了
+        if not st or st >= 400 or not txt:
+            if self._parse_fail_add() >= 4:
+                cache_put('yt:parsedead', '1', self.PARSE_DEAD_TTL)
+            return ''
+        resolved = self.resolve_parse(txt)
+        if resolved and resolved.startswith('http'):
+            # 解析成功：接口是活的，立即清零失败计数并解除熔断
+            cache_put('yt:parsefail', '0', 300)
+            cache_delete('yt:parsedead')
+            return resolved
+        # 接口 200 但这片解析不出：视为「单片失败」，仅在明确 code:0/解析失败
+        # 且连续累计时谨慎熔断；普通单片失败不再误伤全局。
+        flat = txt.replace(' ', '')
+        if '解析失败' in txt or '"code":0' in flat or '"code":500' in flat:
+            if self._parse_fail_add() >= 4:
+                cache_put('yt:parsedead', '1', self.PARSE_DEAD_TTL)
         return ''
 
     # ---------- 类型判断 ----------
@@ -1501,7 +1548,28 @@ class YT4K(object):
             return {'parse': 0, 'url': cached, 'header': dict(self.PARSE_HEADERS)}
 
         if self.is_4k_source(original):
-            resolved = self.parse_url(original, self.PARSE_ID_4K) or original
+            # 4K 直链多为失效的 ym4kjx 404，必须换链。p1：即便全局熔断生效也强试
+            # 一次换链（parsesId=2 独立且实测有效），避免把 404 原链交给播放器。
+            resolved = (self.parse_url(original, self.PARSE_ID_4K)
+                        or self.parse_url(original, self.PARSE_ID_4K, force=True)
+                        or original)
+            # 2026-11-18 p2：换链出的地址在「盒子网络」未必连得上——
+            #   · 联通云 pan.wo.cn:30443 非标端口，很多盒子/运营商直接封；
+            #   · 移动云 cmecloud.cn 呼和浩特节点 + AWS 15min 预签名，对盒子网络/
+            #     系统时间敏感（盒子时间不准会签名 403）。
+            # 沙箱能播不代表盒子能播，所以在这里用盒子本地网络实测一次：
+            # 明确连不上(ok=False)就换链重试一次，仍不通则返回空，交给上层
+            # Spider 的 _play_other 自动换源到能播的线路。
+            # 注意：探活失败不写缓存、不动全局熔断标志，避免误伤别的线路。
+            if resolved and resolved.startswith('http'):
+                pr = probe_media(resolved, dict(self.PARSE_HEADERS), timeout=2.5)
+                if pr.get('ok') is False:
+                    alt = self.parse_url(original, self.PARSE_ID_4K, force=True)
+                    if alt and alt.startswith('http') and alt != resolved:
+                        pr2 = probe_media(alt, dict(self.PARSE_HEADERS), timeout=2.5)
+                        resolved = alt if pr2.get('ok') is not False else ''
+                    else:
+                        resolved = ''
         elif is_stream_url(original):
             resolved = original
         else:
@@ -2656,12 +2724,15 @@ class YtAggSpider(_BaseSpider):
                     self._src('zj')._ensure_session()
             except Exception:
                 pass
-            # 影探的网页线路解析接口是否还活着：后台先探一次，详情页就不用一条条等
+            # 影探的网页线路解析接口是否还活着：后台先探一次，详情页就不用一条条等。
+            # 2026-11-18 p1：这只是「探测样本」，探完无论成败都清零误伤计数——
+            # 单一探测链接下架不代表接口挂了，不能让它参与全局熔断判定。
             try:
                 if 'yt' in self.order and not cache_get('yt:parsedead'):
                     src = self._src('yt')
                     src.parse_url('https://v.qq.com/x/cover/mzc002009suxdpv/d4102bz0ln6.html',
                                   src.PARSE_ID_WEB)
+                    cache_put('yt:parsefail', '0', 300)
             except Exception:
                 pass
 
@@ -2944,14 +3015,22 @@ class YtAggSpider(_BaseSpider):
             try:
                 tag, real, name = self._decode(code)
                 if tag == 'yt':
-                    # 影探：直链直接探；网页线路要解析器，解析接口已知失效就判死（不再白等 6s）
+                    # 影探：直链直接探；网页线路 2026-11-18 p1 起改为「实际解出地址再探」。
+                    # 旧逻辑仅凭 yt:parsedead 标志就把网页线路判死，而该标志会被下架片源
+                    # 误触发（4kzj 接口其实还活着），导致能播的网页线路被排到最后。
                     src = self._src('yt')
                     if src.is_4k_source(real) or is_stream_url(real) or is_media_url(real):
                         results[idx] = self._probe_cached(real, {'User-Agent': 'okhttp/4.12.0'})
                     else:
-                        # 网页线路：解析接口每次要 10s 才回「解析失败」，详情页等不起，
-                        # 所以不在这里探；已知失效就直接判死，否则排到最后（不占默认位）
-                        results[idx] = {'ok': False} if cache_get('yt:parsedead') else {'ok': None, 'page': True}
+                        # 走 playerContent 解出真实地址（内部调 parse_url，成功返回 m3u8）
+                        got = self.playerContent('', code)
+                        url = text(got.get('url'))
+                        if url.startswith('http'):
+                            results[idx] = self._probe_cached(url, got.get('header'))
+                        else:
+                            # 解不出地址：不算「接口已死」，只标记为需解析、排中间，
+                            # 交给播放时的换源重试兜底（可能只是这片没解析结果）
+                            results[idx] = {'ok': None, 'page': True}
                     return
                 got = self.playerContent('', code)
                 url = text(got.get('url'))
