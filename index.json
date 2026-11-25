@@ -41,7 +41,7 @@
    "key": "新云帧享",
    "name": "新云帧享.py",
    "type": 3,
-   "api": "./py2/新云帧享.py",
+   "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/新云帧享.py",
    "searchable": 1,
    "quickSearch": 1,
    "filterable": 1
@@ -50,7 +50,7 @@
       "key": "影探聚合",
       "name": "影探聚合.py",
       "type": 3,
-      "api": "./py2/影探聚合.py",
+      "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/影探聚合.py",
       "searchable": 1,
       "quickSearch": 1,
       "filterable": 1
@@ -59,7 +59,7 @@
    "key": "橘汁视频",
    "name": "橘汁视频",
    "type": 3,
-   "api": "./py2/橘汁视频.py",
+   "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/橘汁视频.py",
    "searchable": 1,
    "quickSearch": 1,
    "filterable": 1
@@ -77,7 +77,7 @@
    "key": "优酷",
    "name": "优酷视频",
    "type": 3,
-   "api": "./py2/优酷.py",
+   "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/优酷.py",
    "searchable": 1,
    "quickSearch": 1,
    "filterable": 1
@@ -86,7 +86,7 @@
    "key": "爱奇艺",
    "name": "爱奇艺",
    "type": 3,
-   "api": "./py2/爱奇艺.py",
+   "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/爱奇艺.py",
    "searchable": 1,
    "quickSearch": 1,
    "filterable": 1
@@ -95,7 +95,7 @@
    "key": "芒果",
    "name": "芒果.py",
    "type": 3,
-   "api": "./py2/芒果.py",
+   "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/芒果.py",
    "searchable": 1,
    "quickSearch": 1,
    "filterable": 1
@@ -113,7 +113,7 @@
    "key": "片库4K",
    "name": "片库4K.py",
    "type": 3,
-   "api": "./py2/片库4K.py",
+   "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/片库4K.py",
    "searchable": 1,
    "quickSearch": 1,
    "filterable": 1
@@ -122,7 +122,7 @@
    "key": "y5影院",
    "name": "Y5影院",
    "type": 3,
-   "api": "./py2/Y5影院.py",
+   "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/Y5影院.py",
    "searchable": 1,
    "quickSearch": 1,
    "filterable": 1
@@ -131,23 +131,16 @@
    "key": "红果",
    "name": "红果短剧",
    "type": 3,
-   "api": "./py2/红果.py",
+   "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/红果.py",
    "searchable": 1,
    "quickSearch": 1,
    "filterable": 1
   },
   {
-   "key": "2400部恐怖电影",
-   "name": "☀恐怖🔹电影",
-   "type": 3,
-   "api": "http://550.3vcn.work/16.js",
-   "ext": "http://550.3vcn.work/2400.js"
-  },
-  {
    "key": "山楂",
    "name": "山楂.py",
    "type": 3,
-   "api": "./py2/山楂.py",
+   "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/山楂.py",
    "searchable": 1,
    "quickSearch": 1,
    "filterable": 1
@@ -156,7 +149,7 @@
    "key": "MiFun动漫",
    "name": "MiFun动漫.py",
    "type": 3,
-   "api": "./py2/MiFun动漫.py",
+   "api": "https://gh-proxy.com/https://raw.githubusercontent.com/lihao880/asdzxc/refs/heads/main/py/MiFun动漫.py",
    "searchable": 1,
    "quickSearch": 1,
    "filterable": 1
