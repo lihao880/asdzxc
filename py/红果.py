@@ -5,6 +5,7 @@ import binascii
 import bisect
 import gzip
 import hashlib
+import hmac
 import json
 import os
 import lzma
@@ -711,6 +712,21 @@ def _spade_value(item: Mapping[str, Any]) -> str:
     if not isinstance(encrypt_info, Mapping):
         encrypt_info = {}
     return _first(item.get("spade_a"), encrypt_info.get("spade_a"))
+
+def _media_content_key(item: Mapping[str, Any], spade: str) -> bytes:
+    """取流密钥：中转链路(_weeou_key)优先，否则用 spade_a 推导。
+    weeou 中转返回的是直给的 16 字节 hex key，不走 derive_content_key。"""
+    relay_key = _text(item.get("_weeou_key")) if isinstance(item, Mapping) else ""
+    if relay_key:
+        try:
+            key = bytes.fromhex(relay_key)
+        except ValueError as exc:
+            raise HongguoPluginError("中转密钥不是十六进制") from exc
+        if len(key) != 16:
+            raise HongguoPluginError("中转密钥长度错误")
+        return key
+    return derive_content_key(spade)
+
 
 def derive_content_key(spade_b64: str) -> bytes:
     raw = _b64(spade_b64)
@@ -3026,8 +3042,93 @@ def _ep_pref_mark(single: bool) -> None:
         _EP_PREF["single"] = single
 
 
+# ===== weeou 中转取流（从红果短剧新.py 移植，2026-11-25 沙箱实测打通）=====
+# 直连 App 接口（v5/hiker/sixgod/551）在本沙箱长期 HTTP 200 空体；
+# weeou 第三方中转取址能稳定拿到真实 CENC 加密流（480/1080），
+# 本机再按 _weeou_key 解密成明文 MP4。中转失败则回退原有全部链路。
+_WEEOU_URL = "http://api.weeou.com/algorithm/video"
+_WEEOU_DUSA_KEY = bytes.fromhex(
+    "6e6f76656c6170695f7369676e5f7365637265745f6368616e67655f6d655f32303236"
+)
+
+
+def _weeou_dusa(body: bytes) -> str:
+    nonce = bytes(random.getrandbits(8) for _ in range(8))
+    timestamp = int(time.time()) & 0xFFFFFFFF
+    stamp = timestamp.to_bytes(4, "little")
+    payload = "POST\n/algorithm/video\n\n" + hashlib.md5(body).hexdigest()
+    first = hmac.new(_WEEOU_DUSA_KEY, nonce, hashlib.sha256).digest()
+    second = hmac.new(first, stamp + payload.encode("utf-8"), hashlib.sha256).digest()
+    token = stamp + second[:16]
+    result = bytearray([0x35]) + bytearray(nonce)
+    for index, value in enumerate(token):
+        rotated = ((value << 3) | (value >> 5)) & 0xFF
+        result.append(rotated ^ first[16 + (index & 15)])
+    return base64.b64encode(result).decode("ascii")
+
+
+def _video_model_weeou(video_id: str) -> dict[str, Any]:
+    body = json.dumps({"video_id": str(video_id)}, separators=(",", ":")).encode("utf-8")
+    response = requests.post(
+        _WEEOU_URL,
+        data=body,
+        headers={
+            "X-Dusa": _weeou_dusa(body),
+            "User-Agent": "okhttp/3.12.13",
+            "Content-Type": "application/json",
+        },
+        timeout=10,
+    )
+    raw = response.content or b""
+    if response.status_code != 200 or not raw:
+        raise HongguoPluginError("中转取流返回空响应（HTTP %s）" % response.status_code)
+    try:
+        root = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HongguoPluginError("中转取流响应不是 JSON") from exc
+    streams = ((root or {}).get("data") or {}).get("streams") or []
+    rows = []
+    for item in streams:
+        if not isinstance(item, Mapping):
+            continue
+        url = _text(item.get("main_url"))
+        definition = _quality(item.get("definition") or item.get("vheight"))
+        if definition not in _QUALITY_ORDER or not url.startswith("http"):
+            continue
+        key = _text(item.get("decrypt_key"))
+        encrypted = bool(item.get("encrypted"))
+        if encrypted and (len(key) != 32 or any(c not in "0123456789abcdefABCDEF" for c in key)):
+            continue
+        rows.append({
+            "main_url": url,
+            "definition": definition,
+            "quality_type": _HG_Q_TO_QTYPE.get(definition, ""),
+            "gear_des_key": _text(item.get("gear_des_key") or item.get("codec_type")),
+            "video_meta": {
+                "definition": definition,
+                "vwidth": item.get("vwidth") or 0,
+                "vheight": item.get("vheight") or 0,
+                "size": item.get("size") or 0,
+            },
+            "spade_a": "d2Vlb3U=" if encrypted else "",
+            "_weeou_key": key if encrypted else "",
+        })
+    if not rows:
+        raise HongguoPluginError("中转播放模型没有可用清晰度")
+    return {"video_list": rows}
+
+
 def _video_model_rotating(video_id: str, config: Mapping[str, Any]) -> dict[str, Any]:
     last_err: BaseException | None = None
+    # weeou 中转取流优先：沙箱实测直连链路长期空体，中转稳定拿到真实流。
+    try:
+        return _video_model_weeou(video_id)
+    except Exception as err:
+        last_err = err
+        try:
+            print("[红果] %s weeou 中转未命中，回退 App 直连：%s" % (video_id, str(err)[:60]))
+        except Exception:
+            pass
     # 2026-11-10 18:39 真机取流实测（同一分钟里换 5 个 vid 各试 5 次、
     # 两个 host 交替、每次现场注册新设备号，全部 HTTP 200 + 空体；80 秒后再试仍空，
     # 而 5 分钟前同一个 vid 一次就回 23791 字节 JSON）证明：空体是站点侧成波出现的，
@@ -3250,7 +3351,7 @@ def _stream_session(video_id: str, config: Mapping[str, Any], quality: str = "10
                     except Exception:
                         total, moov = 0, b""
                     if total and _moov_has_video_track(moov):
-                        session = _StreamSession(url, derive_content_key(spade), total, moov_start, moov)
+                        session = _StreamSession(url, _media_content_key(item, spade), total, moov_start, moov)
                         # 解密后吐给播放器的视轨必须是他认得的编码，bvc2 这种一律不交
                         _sfc = _hg_moov_fourcc(session.moov_plain)
                         if not _sfc or _sfc in _DECODABLE_ENTRIES:
@@ -7939,21 +8040,35 @@ class Spider(_BaseSpider):
         # 才建会话，响应头会被拖延到读超时。这里先建好会话再交 URL。
         cfg = {"device_id": self.device_id or "", "install_id": self.install_id or ""}
         session = None
+        # ⓪ weeou 中转取流优先（2026-11-25 实测：直连 App 链路长期 200 空体，
+        #    中转稳定拿到真实 CENC 加密流）。拿到 model 后走本机解密流服务，
+        #    播放器拿到 127.0.0.1 稳定地址。失败无感回退下面全部原有链路。
+        _weeou_model = None
+        try:
+            _weeou_model = _video_model_weeou(vid)
+        except Exception:
+            _weeou_model = None
+        if _weeou_model:
+            try:
+                session = _stream_session(vid, cfg, q, model_override=_weeou_model)
+            except Exception:
+                session = None
         # ① 551 签名链路优先。旧签名被网关静默拒绝（HTTP 200 空体）后，它是唯一
         #    还能拿到片源的 App 通道；一次设备注册 + 一次请求就有结论，比旧签名
         #    5 轮重试（实测 ~26s，超过播放器读超时）快得多。
         #    归一化后的 model 直接喂给 _stream_session —— CENC 加密流仍走本机解密
         #    流服务，播放器拿到的是 127.0.0.1 的稳定地址，不会因 CDN 校验丢帧。
         model551 = None
-        try:
-            model551 = _hg551_any_model(vid)
-        except Exception:
-            model551 = None
-        if model551:
+        if session is None:  # weeou 已拿到会话就不再打 551，省一次注册+请求
             try:
-                session = _stream_session(vid, cfg, q, model_override=model551)
+                model551 = _hg551_any_model(vid)
             except Exception:
-                session = None
+                model551 = None
+            if model551:
+                try:
+                    session = _stream_session(vid, cfg, q, model_override=model551)
+                except Exception:
+                    session = None
         rc_recent = time.time() - _HG_FT_CTRL.get("ts", 0.0) < _HG_FT_CTRL_TTL
         if session is None and model551 is None and not rc_recent:
             # 551 没拿到时才用旧签名探针：单次取流请求快速判定风控状态（被拒时
@@ -8316,7 +8431,7 @@ class Spider(_BaseSpider):
                         last_err = "skip large %s without native AES size=%s" % (wanted, len(body))
                         continue
 
-                    plain = decrypt_mp4_cenc(body, derive_content_key(spade))
+                    plain = decrypt_mp4_cenc(body, _media_content_key(item, spade))
                     if len(plain) < 64 or (b"ftyp" not in plain[:64] and b"moov" not in plain[:4096]):
                         last_err = "bad mp4 after decrypt q=%s" % wanted
                         continue
@@ -8340,3 +8455,55 @@ class Spider(_BaseSpider):
             msg = "hg localProxy failed: %s\n%s" % (exc, traceback.format_exc())
             return [500, "text/plain; charset=utf-8", msg.encode("utf-8")]
 
+
+# ===== 模块级转发（单文件 type:3 直接加载）=====
+_gi_s = None
+
+
+def _gi():
+    global _gi_s
+    if _gi_s is None:
+        _gi_s = Spider()
+        if hasattr(_gi_s, "init"):
+            _gi_s.init()
+    return _gi_s
+
+
+def init(*a, **k):
+    return _gi().init(*a, **k)
+
+
+def homeContent(filter=False):
+    return _gi().homeContent(filter)
+
+
+def categoryContent(tid, pg="1", filter=False, extend=None):
+    return _gi().categoryContent(tid, pg, filter, extend)
+
+
+def detailContent(ids, flags=None):
+    return _gi().detailContent(ids)
+
+
+def searchContent(key, quick=False, pg="1"):
+    return _gi().searchContent(key, quick, pg)
+
+
+def playerContent(flag, id, vipFlags=None):
+    return _gi().playerContent(flag, id, vipFlags)
+
+
+def localProxy(param):
+    return _gi().localProxy(param)
+
+
+def destroy():
+    global _gi_s
+    s = globals().get("_gi_s")
+    if s is not None and hasattr(s, "destroy"):
+        s.destroy()
+    _gi_s = None
+    return None
+
+
+spider = Spider
